@@ -26,6 +26,10 @@ export interface SsoRuntimeConfig {
   client_secret: string;
   provider_name: string;
   configured: boolean;
+  use_par: boolean;
+  use_jarm: boolean;
+  use_dpop: boolean;
+  jar_private_jwk: string;
 }
 
 function parseBool(value: string | undefined, fallback: boolean): boolean {
@@ -105,6 +109,10 @@ export function getSsoConfig(env: Env): SsoRuntimeConfig {
     client_secret: clientSecret,
     provider_name: providerName,
     configured: isValidOidcIssuer(issuer) && clientId.length > 0 && clientSecret.length > 0,
+    use_par: env.SSO_USE_PAR !== "0",
+    use_jarm: env.SSO_USE_JARM === "1",
+    use_dpop: env.SSO_USE_DPOP === "1",
+    jar_private_jwk: env.SSO_JAR_PRIVATE_JWK?.trim() ?? "",
   };
 }
 

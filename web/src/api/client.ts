@@ -244,6 +244,18 @@ function optionalAuthHeaders(token: string | null): HeadersInit | undefined {
 export const realApi = {
   getInstanceConfig: () => request<InstanceConfig>('/api/instance/config'),
 
+  logout: (token: string) =>
+    request<{ ok: boolean; logout_url?: string | null }>('/api/auth/logout', {
+      method: 'POST',
+      headers: authHeaders(token),
+    }),
+
+  refreshSso: (token: string) =>
+    request<AuthResponse>('/api/auth/oidc/refresh', {
+      method: 'POST',
+      headers: authHeaders(token),
+    }),
+
   completeOidcLogin: (code: string) =>
     request<AuthResponse>('/api/auth/oidc/complete', {
       method: 'POST',

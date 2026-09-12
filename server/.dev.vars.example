@@ -12,6 +12,13 @@ DEV_TOKEN_SECRET=change-me-to-a-random-value
 # SSO_CLIENT_ID=openmew-local
 # SSO_CLIENT_SECRET=
 # SSO_PROVIDER_NAME=SSO
+# Optional advanced OIDC negotiation flags. PAR is enabled whenever the
+# provider advertises it; JARM/DPoP are opt-in. SSO_JAR_PRIVATE_JWK is a
+# client signing key and must remain a Worker Secret.
+# SSO_USE_PAR=1
+# SSO_USE_JARM=0
+# SSO_USE_DPOP=0
+# SSO_JAR_PRIVATE_JWK=
 
 # Instance policy (m0-protocol §7.9) - deployed defaults live in wrangler.jsonc
 # `vars`; uncomment any of these here to override locally without touching that

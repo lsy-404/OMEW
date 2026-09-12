@@ -6,6 +6,7 @@ import type { AuthResponse, AuthUser, LoginPayload, RegisterPayload } from '../a
 
 const TOKEN_KEY = 'openmew-token'
 const USER_KEY = 'openmew-user'
+const AUTH_SOURCE_KEY = 'openmew-auth-source'
 
 function readStoredUser(): AuthUser | null {
   const raw = localStorage.getItem(USER_KEY)
@@ -19,6 +20,7 @@ function readStoredUser(): AuthUser | null {
 
 const token = ref<string | null>(localStorage.getItem(TOKEN_KEY))
 const user = ref<AuthUser | null>(readStoredUser())
+const authSource = ref<'local' | 'sso'>(localStorage.getItem(AUTH_SOURCE_KEY) === 'sso' ? 'sso' : 'local')
 // set when a 401 kicks an existing session out, so the auth gate keeps the
 // login tab for returning users instead of the fresh-visitor register default
 const sessionExpired = ref(false)
@@ -27,15 +29,18 @@ function persist() {
   if (token.value && user.value) {
     localStorage.setItem(TOKEN_KEY, token.value)
     localStorage.setItem(USER_KEY, JSON.stringify(user.value))
+    localStorage.setItem(AUTH_SOURCE_KEY, authSource.value)
   } else {
     localStorage.removeItem(TOKEN_KEY)
     localStorage.removeItem(USER_KEY)
+    localStorage.removeItem(AUTH_SOURCE_KEY)
   }
 }
 
 function setSession(session: AuthResponse) {
   token.value = session.token
   user.value = session.user
+  authSource.value = session.auth_source === 'sso' ? 'sso' : 'local'
   sessionExpired.value = false
   persist()
 }
@@ -91,10 +96,41 @@ async function register(payload: RegisterPayload): Promise<AuthResponse> {
   return api.register(payload)
 }
 
-function logout() {
-  token.value = null
-  user.value = null
-  persist()
+let logoutInFlight: Promise<void> | null = null
+
+async function logout() {
+  if (logoutInFlight) return logoutInFlight
+  const currentToken = token.value
+  const shouldFederate = authSource.value === 'sso'
+  logoutInFlight = (async () => {
+    let logoutUrl: string | null = null
+    if (currentToken) {
+      try {
+        const result = await api.logout(currentToken)
+        logoutUrl = result.logout_url ?? null
+      } catch {
+        // Local state is still cleared when the network is unavailable.
+      }
+    }
+    token.value = null
+    user.value = null
+    authSource.value = 'local'
+    persist()
+    if (shouldFederate && logoutUrl) window.location.assign(logoutUrl)
+  })().finally(() => {
+    logoutInFlight = null
+  })
+  return logoutInFlight
+}
+
+async function refreshSso() {
+  if (!token.value || authSource.value !== 'sso') return false
+  try {
+    setSession(await api.refreshSso(token.value))
+    return true
+  } catch {
+    return false
+  }
 }
 
 // applies a local patch to the stored user (e.g. right after totp
@@ -108,13 +144,14 @@ function updateUser(patch: Partial<AuthUser>) {
 
 setUnauthorizedHandler(() => {
   sessionExpired.value = true
-  logout()
+  void logout()
 })
 
 export function useAuth() {
   return {
     token,
     user,
+    authSource,
     isAuthenticated: computed(() => !!token.value),
     sessionExpired,
     ssoCompletionError,
@@ -126,6 +163,7 @@ export function useAuth() {
     loginTotp,
     loginPasskey,
     completeOidcLoginFromLocation,
+    refreshSso,
     register,
     setSession,
     updateUser,

@@ -105,9 +105,15 @@ watch(
 onMounted(() => {
   window.addEventListener('popstate', syncHomeFromAddress)
   void auth.completeOidcLoginFromLocation()
+  const timer = window.setInterval(() => {
+    if (auth.isAuthenticated.value && auth.authSource.value === 'sso') void auth.refreshSso()
+  }, 4 * 60 * 1000)
+  refreshTimer = timer
 })
+let refreshTimer: number | undefined
 onBeforeUnmount(() => {
   window.removeEventListener('popstate', syncHomeFromAddress)
+  if (refreshTimer !== undefined) window.clearInterval(refreshTimer)
 })
 </script>
 

@@ -11,6 +11,10 @@ interface Env {
   SSO_CLIENT_ID?: string;
   SSO_CLIENT_SECRET?: string;
   SSO_PROVIDER_NAME?: string;
+  SSO_USE_PAR?: string;
+  SSO_USE_JARM?: string;
+  SSO_USE_DPOP?: string;
+  SSO_JAR_PRIVATE_JWK?: string;
   INSTANCE_MODE?: string;
   ROOT_STRONGHOLD?: string;
   INSTANCE_LOGO_URL?: string;
@@ -30,6 +34,10 @@ declare namespace Cloudflare {
     SSO_CLIENT_ID?: string;
     SSO_CLIENT_SECRET?: string;
     SSO_PROVIDER_NAME?: string;
+    SSO_USE_PAR?: string;
+    SSO_USE_JARM?: string;
+    SSO_USE_DPOP?: string;
+    SSO_JAR_PRIVATE_JWK?: string;
     INSTANCE_MODE?: string;
     ROOT_STRONGHOLD?: string;
     INSTANCE_LOGO_URL?: string;

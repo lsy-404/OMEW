@@ -30,6 +30,9 @@
     "SSO_ISSUER": "",
     "SSO_CLIENT_ID": "",
     "SSO_PROVIDER_NAME": "",
+    "SSO_USE_PAR": "1",
+    "SSO_USE_JARM": "0",
+    "SSO_USE_DPOP": "0",
     // m0-protocol §7.9: instance policy as deployment env config - see
     // server/src/config.ts for parsing and .dev.vars.example for local overrides.
     "ALLOW_ROOT": "1",

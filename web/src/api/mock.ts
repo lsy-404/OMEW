@@ -809,6 +809,14 @@ export class MockRoomTransport implements RoomTransport {
 }
 
 export const mockApi = {
+  async logout(): Promise<{ ok: boolean; logout_url?: string | null }> {
+    return { ok: true, logout_url: null }
+  },
+
+  async refreshSso(): Promise<never> {
+    throw new ApiRequestError('SSO_REFRESH_UNAVAILABLE', 401)
+  },
+
   async completeOidcLogin(): Promise<never> {
     throw new ApiRequestError('SSO_NOT_CONFIGURED', 503)
   },

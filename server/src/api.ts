@@ -16,10 +16,14 @@ import { handleInbox } from "./inbox";
 import {
   beginOidcAuthorization,
   clearOidcTransactionCookie,
-  consumeOidcLoginCompletion,
+  consumeOidcLoginCompletionDetails,
   createOidcLoginCompletion,
   finishOidcAuthorization,
   mapOidcIdentity,
+  oidcLogoutUrl,
+  refreshOidcSession,
+  revokeOidcSession,
+  storeOidcSession,
   OidcError,
   oidcLoginCompletionRedirect,
   type OidcUserRow,
@@ -83,6 +87,9 @@ const ROOT_SETUP_PATHS = new Set([
   "/api/auth/oidc/start",
   "/api/auth/oidc/callback",
   "/api/auth/oidc/complete",
+  "/api/auth/oidc/refresh",
+  "/api/auth/logout",
+  "/api/auth/logout/complete",
   "/api/register",
   "/api/login",
   "/api/login/totp",
@@ -571,6 +578,14 @@ async function requireSession(request: Request, env: Env): Promise<SessionTokenC
   } else if (sso.mode === "disabled" && claims.auth_source !== "local") {
     return apiError(401, "SSO_DISABLED");
   }
+  if (claims.auth_source === "sso") {
+    try {
+      const federated = await env.DB.prepare("SELECT revoked_at FROM oidc_sessions WHERE session_jti = ?").bind(claims.jti).first<{ revoked_at: number | null }>();
+      if (federated?.revoked_at) return apiError(401, "AUTH_REQUIRED");
+    } catch (error) {
+      if (!/no such table/i.test(error instanceof Error ? error.message : String(error))) throw error;
+    }
+  }
   if (domainOfActor(claims.actor) !== instanceDomain(env)) {
     return { ...claims, server_role: "user" };
   }
@@ -802,7 +817,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
       const result = await finishOidcAuthorization(request, env, sso);
       const mapped = await mapOidcIdentity(env, result.identity);
       if (mapped.status !== "active") return apiError(403, "ACCOUNT_DISABLED");
-      const completion = await createOidcLoginCompletion(env, mapped.localpart);
+      const completion = await createOidcLoginCompletion(env, mapped.localpart, sso, result.tokens);
       return oidcLoginCompletionRedirect(request, env, result.return_to, completion);
     } catch (error) {
       if (error instanceof OidcError) {
@@ -818,8 +833,9 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     const body = await readJsonBody(request);
     if (!body) return apiError(413, "PAYLOAD_INVALID");
     const completion = typeof body.code === "string" ? body.code : "";
-    const localpart = await consumeOidcLoginCompletion(env, completion);
-    if (!localpart) return apiError(401, "SSO_COMPLETION_INVALID");
+    const completionDetails = await consumeOidcLoginCompletionDetails(env, completion);
+    const localpart = completionDetails?.localpart ?? null;
+    if (!completionDetails || !localpart) return apiError(401, "SSO_COMPLETION_INVALID");
     const sso = getSsoConfig(env);
     if (sso.mode === "disabled") return apiError(401, "SSO_DISABLED");
     if (sso.mode === "required" && !sso.configured) return apiError(503, "SSO_NOT_CONFIGURED");
@@ -828,8 +844,64 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     if (!user || user.status !== "active") return apiError(403, "ACCOUNT_DISABLED");
     const actor = `@${localpart}:${instanceDomain(env)}`;
     const token = await issueSessionToken(actor, user.server_role, "sso", env);
+    if (completionDetails.refresh_token_ciphertext || completionDetails.id_token_ciphertext) {
+      await env.DB.prepare(`
+        INSERT OR REPLACE INTO oidc_sessions
+          (session_jti, localpart, issuer, client_id, refresh_token_ciphertext, id_token_ciphertext,
+           dpop_key_ciphertext, access_token_expires_at, refresh_token_expires_at, created_at, updated_at, revoked_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM oidc_sessions WHERE session_jti = ?), ?), ?, NULL)
+      `).bind(
+        sessionJtiFromToken(token),
+        localpart,
+        sso.issuer,
+        sso.client_id,
+        completionDetails.refresh_token_ciphertext,
+        completionDetails.id_token_ciphertext,
+        completionDetails.dpop_key_ciphertext,
+        completionDetails.token_expires_at,
+        completionDetails.refresh_token_ciphertext ? Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60 : null,
+        sessionJtiFromToken(token),
+        Math.floor(Date.now() / 1000),
+        Math.floor(Date.now() / 1000),
+      ).run();
+    }
     await touchLastActive(env, localpart);
     return json({ token, user: toPublicUser(user, actor), auth_source: "sso" });
+  }
+
+  if (method === "POST" && path === "/api/auth/oidc/refresh") {
+    const session = await requireSession(request, env);
+    if (session instanceof Response) return session;
+    if (session.auth_source !== "sso") return apiError(400, "SSO_REQUIRED");
+    const sso = getSsoConfig(env);
+    if (!sso.configured) return apiError(503, "SSO_NOT_CONFIGURED");
+    try {
+      const refreshed = await refreshOidcSession(env, session, sso);
+      const localpart = localpartOfActor(session.actor);
+      const user = await localUserByLocalpart(env, localpart);
+      if (!user || user.status !== "active") return apiError(401, "ACCOUNT_DISABLED");
+      await touchLastActive(env, localpart);
+      return json({ token: refreshed.token, user: toPublicUser(user, session.actor), auth_source: "sso", refreshed: true });
+    } catch (error) {
+      if (error instanceof OidcError) return apiError(error.status, error.code);
+      throw error;
+    }
+  }
+
+  if (method === "POST" && path === "/api/auth/logout") {
+    const session = await requireSession(request, env);
+    if (session instanceof Response) return session;
+    let logoutUrl: string | null = null;
+    if (session.auth_source === "sso") {
+      const sso = getSsoConfig(env);
+      if (sso.configured) logoutUrl = await oidcLogoutUrl(env, session, sso, `${new URL(request.url).origin}/api/auth/logout/complete`);
+      await revokeOidcSession(env, session);
+    }
+    return json({ ok: true, logout_url: logoutUrl });
+  }
+
+  if (method === "GET" && path === "/api/auth/logout/complete") {
+    return Response.redirect(`${new URL(request.url).origin}/#/login?logout=complete`, 303);
   }
 
   const branding = getInstanceBranding(env);
@@ -3965,6 +4037,18 @@ async function issueSessionToken(actor: string, serverRole: ServerRole, authSour
     exp: nowS() + SESSION_TOKEN_TTL_S, jti: newJti(),
   };
   return signToken(claims, env.DEV_TOKEN_SECRET);
+}
+
+function sessionJtiFromToken(token: string): string {
+  try {
+    const [payload] = token.split(".");
+    const claims = JSON.parse(new TextDecoder().decode(base64UrlDecode(payload || ""))) as { jti?: unknown };
+    if (typeof claims.jti === "string" && claims.jti) return claims.jti;
+  } catch {
+    // The token was just signed locally; an invalid payload is handled by the
+    // normal session verification path rather than being accepted here.
+  }
+  throw new Error("session token payload is invalid");
 }
 
 async function requireMembership(request: Request, env: Env, strongholdId: string): Promise<Response | null> {

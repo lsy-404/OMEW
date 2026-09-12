@@ -1,14 +1,21 @@
 import {
+  CompactSign,
   createLocalJWKSet,
+  decodeJwt,
   EncryptJWT,
+  exportJWK,
+  generateKeyPair,
+  importJWK,
   jwtDecrypt,
   jwtVerify,
+  SignJWT,
+  calculateJwkThumbprint,
   type JSONWebKeySet,
   type JWTPayload,
 } from "jose";
-import { base64UrlEncode } from "./auth";
+import { base64UrlDecode, base64UrlEncode, signToken, verifyToken } from "./auth";
 import type { SsoRuntimeConfig } from "./config";
-import { HOME_DOMAIN, instanceDomain, type ServerRole } from "./types";
+import { HOME_DOMAIN, instanceDomain, type ServerRole, type SessionTokenClaims } from "./types";
 import { isValidEmail } from "./users";
 
 const AUTH_REQUEST_TTL_S = 10 * 60;
@@ -34,7 +41,15 @@ interface OidcDiscovery {
   scopes_supported?: string[];
   code_challenge_methods_supported?: string[];
   token_endpoint_auth_methods_supported?: string[];
+  token_endpoint_auth_method: "client_secret_basic" | "client_secret_post";
   id_token_signing_alg_values_supported: string[];
+  response_modes_supported?: string[];
+  pushed_authorization_request_endpoint?: string;
+  end_session_endpoint?: string;
+  device_authorization_endpoint?: string;
+  backchannel_authentication_endpoint?: string;
+  dpop_signing_alg_values_supported?: string[];
+  grant_types_supported?: string[];
 }
 
 interface OidcTransactionData {
@@ -44,6 +59,11 @@ interface OidcTransactionData {
   code_verifier: string;
   redirect_uri: string;
   return_to: string;
+  use_par: boolean;
+  use_jarm: boolean;
+  dpop_private_jwk?: JsonWebKey;
+  dpop_public_jwk?: JsonWebKey;
+  dpop_jkt?: string;
 }
 
 interface OidcTransactionClaims extends JWTPayload, OidcTransactionData {}
@@ -54,6 +74,17 @@ export interface OidcIdentity {
   display_name: string;
   email: string | null;
   email_verified: boolean;
+}
+
+export interface OidcTokenSet {
+  id_token: string;
+  access_token: string;
+  token_type: string;
+  refresh_token?: string;
+  expires_in?: number;
+  cnf?: { jkt: string };
+  dpop_private_jwk?: JsonWebKey;
+  dpop_public_jwk?: JsonWebKey;
 }
 
 export interface OidcUserRow {
@@ -201,9 +232,10 @@ async function discover(config: SsoRuntimeConfig, fetcher: OidcFetch): Promise<O
   const challengeMethods = stringArray(payload.code_challenge_methods_supported);
   if (challengeMethods && !challengeMethods.includes("S256")) throw new OidcError("SSO_CONFIGURATION_INVALID", 503);
   const authMethods = stringArray(payload.token_endpoint_auth_methods_supported);
-  if (authMethods && !authMethods.includes("client_secret_basic")) {
+  if (authMethods && !authMethods.some((method) => ["client_secret_basic", "client_secret_post"].includes(method))) {
     throw new OidcError("SSO_CONFIGURATION_INVALID", 503);
   }
+  const tokenEndpointAuthMethod = !authMethods || authMethods.includes("client_secret_basic") ? "client_secret_basic" : "client_secret_post";
   return {
     issuer: config.issuer,
     authorization_endpoint: authorizationEndpoint.toString(),
@@ -214,7 +246,15 @@ async function discover(config: SsoRuntimeConfig, fetcher: OidcFetch): Promise<O
     scopes_supported: scopes,
     code_challenge_methods_supported: challengeMethods,
     token_endpoint_auth_methods_supported: authMethods,
+    token_endpoint_auth_method: tokenEndpointAuthMethod,
     id_token_signing_alg_values_supported: supportedAlgorithms,
+    response_modes_supported: stringArray(payload.response_modes_supported),
+    pushed_authorization_request_endpoint: endpointUrl(payload.pushed_authorization_request_endpoint)?.toString(),
+    end_session_endpoint: endpointUrl(payload.end_session_endpoint)?.toString(),
+    device_authorization_endpoint: endpointUrl(payload.device_authorization_endpoint)?.toString(),
+    backchannel_authentication_endpoint: endpointUrl(payload.backchannel_authentication_endpoint)?.toString(),
+    dpop_signing_alg_values_supported: stringArray(payload.dpop_signing_alg_values_supported),
+    grant_types_supported: stringArray(payload.grant_types_supported),
   };
 }
 
@@ -290,7 +330,9 @@ async function readTransactionCookie(token: string, secret: string): Promise<Oid
       typeof payload.nonce !== "string" ||
       typeof payload.code_verifier !== "string" ||
       typeof payload.redirect_uri !== "string" ||
-      typeof payload.return_to !== "string"
+      typeof payload.return_to !== "string" ||
+      typeof payload.use_par !== "boolean" ||
+      typeof payload.use_jarm !== "boolean"
     ) {
       throw new Error("invalid transaction");
     }
@@ -298,6 +340,49 @@ async function readTransactionCookie(token: string, secret: string): Promise<Oid
   } catch {
     throw new OidcError("SSO_STATE_INVALID", 400);
   }
+}
+
+function parseJwkSecret(value: string): JsonWebKey | null {
+  if (!value) return null;
+  try {
+    const jwk = JSON.parse(value) as JsonWebKey;
+    return jwk && typeof jwk === "object" ? jwk : null;
+  } catch {
+    throw new OidcError("SSO_CONFIGURATION_INVALID", 503);
+  }
+}
+
+async function createDpopMaterial(): Promise<{ privateJwk: JsonWebKey; publicJwk: JsonWebKey; jkt: string }> {
+  const keyPair = await generateKeyPair("ES256", { extractable: true });
+  const privateJwk = await exportJWK(keyPair.privateKey);
+  const publicJwk = await exportJWK(keyPair.publicKey);
+  const jkt = await calculateJwkThumbprint(publicJwk, "sha256");
+  return { privateJwk: privateJwk as unknown as JsonWebKey, publicJwk: publicJwk as unknown as JsonWebKey, jkt };
+}
+
+async function createDpopProof(privateJwk: JsonWebKey, publicJwk: JsonWebKey, method: string, htu: string): Promise<string> {
+  return new CompactSign(new TextEncoder().encode(JSON.stringify({
+    htm: method,
+    htu,
+    iat: nowS(),
+    jti: crypto.randomUUID(),
+  })))
+    .setProtectedHeader({ typ: "dpop+jwt", alg: "ES256", jwk: publicJwk })
+    .sign(await importJWK(privateJwk, "ES256"));
+}
+
+async function signedRequestObject(config: SsoRuntimeConfig, parameters: URLSearchParams): Promise<string | null> {
+  const jwk = parseJwkSecret(config.jar_private_jwk);
+  if (!jwk) return null;
+  const claims = Object.fromEntries(parameters.entries());
+  const metadata = jwk as JsonWebKey & { alg?: string; kid?: string };
+  return new SignJWT(claims)
+    .setProtectedHeader({ typ: "oauth-authz-req+jwt", alg: metadata.alg || "RS256", kid: metadata.kid })
+    .setIssuer(config.client_id)
+    .setAudience(config.issuer)
+    .setIssuedAt()
+    .setExpirationTime("5m")
+    .sign(await importJWK(jwk as never, metadata.alg || "RS256"));
 }
 
 function redirect(location: string, setCookie?: string): Response {
@@ -315,6 +400,29 @@ export function clearOidcTransactionCookie(request: Request): string {
   return cookieHeader(transactionCookieName(request), "", 0, new URL(request.url).protocol === "https:");
 }
 
+async function pushAuthorizationRequest(
+  metadata: OidcDiscovery,
+  config: SsoRuntimeConfig,
+  parameters: URLSearchParams,
+  fetcher: OidcFetch,
+): Promise<string | null> {
+  if (!metadata.pushed_authorization_request_endpoint || config.use_par === false) return null;
+  const body = new URLSearchParams(parameters);
+  const authHeaders = clientAuthenticationHeaders(config, metadata, body);
+  const payload = await fetchJson(new URL(metadata.pushed_authorization_request_endpoint), {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/x-www-form-urlencoded",
+      "Cache-Control": "no-store",
+      ...authHeaders,
+    },
+    body,
+  }, fetcher, OIDC_TOKEN_MAX_BYTES);
+  if (typeof payload.request_uri !== "string" || payload.request_uri.length > 2048 || typeof payload.expires_in !== "number" || payload.expires_in <= 0) throw new OidcError("SSO_UPSTREAM_INVALID", 502);
+  return payload.request_uri;
+}
+
 export async function beginOidcAuthorization(
   request: Request,
   env: Env,
@@ -328,6 +436,25 @@ export async function beginOidcAuthorization(
   const codeVerifier = randomBase64Url(48);
   const redirectUri = oidcRedirectUri(request, env);
   const returnTo = safeReturnTo(new URL(request.url).searchParams.get("return_to"));
+  const useJarm = config.use_jarm && metadata.response_modes_supported?.includes("jwt") === true;
+  const dpop = config.use_dpop && metadata.dpop_signing_alg_values_supported?.includes("ES256") === true
+    ? await createDpopMaterial()
+    : null;
+  const parameters = new URLSearchParams({
+    response_type: "code",
+    response_mode: useJarm ? "jwt" : "query",
+    client_id: config.client_id,
+    redirect_uri: redirectUri,
+    scope: requestedScopes(metadata),
+    state,
+    nonce,
+    code_challenge: await sha256Base64Url(codeVerifier),
+    code_challenge_method: "S256",
+    ...(dpop ? { dpop_jkt: dpop.jkt } : {}),
+  });
+  const requestObject = await signedRequestObject(config, parameters);
+  if (requestObject) parameters.set("request", requestObject);
+  const requestUri = await pushAuthorizationRequest(metadata, config, parameters, fetcher);
   const transaction = await createTransactionCookie({
     typ: "oidc_transaction",
     state,
@@ -335,21 +462,28 @@ export async function beginOidcAuthorization(
     code_verifier: codeVerifier,
     redirect_uri: redirectUri,
     return_to: returnTo,
+    use_par: Boolean(requestUri),
+    use_jarm: useJarm,
+    ...(dpop ? { dpop_private_jwk: dpop.privateJwk, dpop_public_jwk: dpop.publicJwk, dpop_jkt: dpop.jkt } : {}),
   }, env.DEV_TOKEN_SECRET);
 
   const authorization = new URL(metadata.authorization_endpoint);
-  authorization.searchParams.set("response_type", "code");
-  authorization.searchParams.set("response_mode", "query");
-  authorization.searchParams.set("client_id", config.client_id);
-  authorization.searchParams.set("redirect_uri", redirectUri);
-  authorization.searchParams.set("scope", "openid profile email");
-  authorization.searchParams.set("state", state);
-  authorization.searchParams.set("nonce", nonce);
-  authorization.searchParams.set("code_challenge", await sha256Base64Url(codeVerifier));
-  authorization.searchParams.set("code_challenge_method", "S256");
+  if (requestUri) {
+    authorization.searchParams.set("client_id", config.client_id);
+    authorization.searchParams.set("request_uri", requestUri);
+  } else {
+    for (const [name, value] of parameters) authorization.searchParams.set(name, value);
+  }
 
   const secure = new URL(request.url).protocol === "https:";
   return redirect(authorization.toString(), cookieHeader(transactionCookieName(request), transaction, AUTH_REQUEST_TTL_S, secure));
+}
+
+function requestedScopes(metadata: OidcDiscovery): string {
+  const supported = metadata.scopes_supported;
+  return ["openid", "profile", "email", "offline_access"]
+    .filter((scope) => !supported || supported.includes(scope))
+    .join(" ");
 }
 
 function exactParameter(url: URL, name: string, maxLength: number): string | null {
@@ -370,29 +504,42 @@ function formEncode(value: string): string {
   );
 }
 
+function clientAuthenticationHeaders(config: SsoRuntimeConfig, metadata: OidcDiscovery, body: URLSearchParams): Record<string, string> {
+  if (metadata.token_endpoint_auth_method === "client_secret_post") {
+    body.set("client_id", config.client_id);
+    body.set("client_secret", config.client_secret);
+    return {};
+  }
+  return { Authorization: `Basic ${base64Utf8(`${formEncode(config.client_id)}:${formEncode(config.client_secret)}`)}` };
+}
+
 async function exchangeCode(
   code: string,
   transaction: OidcTransactionClaims,
   config: SsoRuntimeConfig,
   metadata: OidcDiscovery,
   fetcher: OidcFetch,
-): Promise<{ id_token: string; access_token: string }> {
+): Promise<OidcTokenSet> {
   const body = new URLSearchParams({
     grant_type: "authorization_code",
     code,
     redirect_uri: transaction.redirect_uri,
     code_verifier: transaction.code_verifier,
   });
-  const credentials = `${formEncode(config.client_id)}:${formEncode(config.client_secret)}`;
+  const authHeaders = clientAuthenticationHeaders(config, metadata, body);
+  const dpopHeader = transaction?.dpop_private_jwk && transaction.dpop_public_jwk
+    ? await createDpopProof(transaction.dpop_private_jwk, transaction.dpop_public_jwk, "POST", metadata.token_endpoint)
+    : undefined;
   const payload = await fetchJson(
     new URL(metadata.token_endpoint),
     {
       method: "POST",
       headers: {
         Accept: "application/json",
-        Authorization: `Basic ${base64Utf8(credentials)}`,
         "Cache-Control": "no-store",
         "Content-Type": "application/x-www-form-urlencoded",
+        ...authHeaders,
+        ...(dpopHeader ? { DPoP: dpopHeader } : {}),
       },
       body,
     },
@@ -407,11 +554,56 @@ async function exchangeCode(
     payload.access_token.length === 0 ||
     payload.access_token.length > OIDC_TOKEN_MAX_BYTES ||
     typeof payload.token_type !== "string" ||
-    payload.token_type.toLowerCase() !== "bearer"
+    !["bearer", "dpop"].includes(payload.token_type.toLowerCase())
   ) {
     throw new OidcError("SSO_TOKEN_INVALID", 401);
   }
-  return { id_token: payload.id_token, access_token: payload.access_token };
+  const tokenType = payload.token_type.toLowerCase();
+  if (transaction.dpop_jkt && (tokenType !== "dpop" || !dpopConfirmationMatches(payload.cnf, transaction.dpop_jkt))) {
+    throw new OidcError("SSO_TOKEN_INVALID", 401);
+  }
+  if (!transaction.dpop_jkt && tokenType === "dpop") throw new OidcError("SSO_TOKEN_INVALID", 401);
+  return {
+    id_token: payload.id_token,
+    access_token: payload.access_token,
+    token_type: payload.token_type,
+    refresh_token: typeof payload.refresh_token === "string" ? payload.refresh_token : undefined,
+    expires_in: typeof payload.expires_in === "number" ? payload.expires_in : undefined,
+    cnf: dpopConfirmation(payload.cnf),
+    ...(transaction?.dpop_private_jwk && transaction.dpop_public_jwk
+      ? { dpop_private_jwk: transaction.dpop_private_jwk, dpop_public_jwk: transaction.dpop_public_jwk }
+      : {}),
+  };
+}
+
+async function providerJwks(metadata: OidcDiscovery, fetcher: OidcFetch): Promise<JSONWebKeySet> {
+  const jwksPayload = await fetchJson(
+    new URL(metadata.jwks_uri),
+    { method: "GET", headers: { Accept: "application/jwk-set+json, application/json" } },
+    fetcher,
+  );
+  if (!Array.isArray(jwksPayload.keys) || jwksPayload.keys.length === 0 || jwksPayload.keys.length > 100) throw new OidcError("SSO_UPSTREAM_INVALID", 502);
+  return jwksPayload as unknown as JSONWebKeySet;
+}
+
+async function verifyJarm(
+  response: string,
+  config: SsoRuntimeConfig,
+  metadata: OidcDiscovery,
+  fetcher: OidcFetch,
+): Promise<JWTPayload> {
+  try {
+    const payload = (await jwtVerify(response, createLocalJWKSet(await providerJwks(metadata, fetcher)), {
+      issuer: config.issuer,
+      audience: config.client_id,
+      algorithms: metadata.id_token_signing_alg_values_supported,
+      clockTolerance: 60,
+    })).payload;
+    if (typeof payload.exp !== "number" || typeof payload.state !== "string" || (!payload.code && !payload.error)) throw new Error("invalid JARM");
+    return payload;
+  } catch {
+    throw new OidcError("SSO_TOKEN_INVALID", 401);
+  }
 }
 
 async function verifyIdToken(
@@ -420,19 +612,13 @@ async function verifyIdToken(
   config: SsoRuntimeConfig,
   metadata: OidcDiscovery,
   fetcher: OidcFetch,
+  requireNonce = true,
 ): Promise<JWTPayload> {
-  const jwksPayload = await fetchJson(
-    new URL(metadata.jwks_uri),
-    { method: "GET", headers: { Accept: "application/jwk-set+json, application/json" } },
-    fetcher,
-  );
-  if (!Array.isArray(jwksPayload.keys) || jwksPayload.keys.length === 0 || jwksPayload.keys.length > 100) {
-    throw new OidcError("SSO_UPSTREAM_INVALID", 502);
-  }
+  const jwksPayload = await providerJwks(metadata, fetcher);
 
   let payload: JWTPayload;
   try {
-    ({ payload } = await jwtVerify(idToken, createLocalJWKSet(jwksPayload as unknown as JSONWebKeySet), {
+    ({ payload } = await jwtVerify(idToken, createLocalJWKSet(jwksPayload), {
       issuer: config.issuer,
       audience: config.client_id,
       algorithms: metadata.id_token_signing_alg_values_supported,
@@ -445,7 +631,7 @@ async function verifyIdToken(
   if (
     typeof payload.exp !== "number" ||
     typeof payload.iat !== "number" ||
-    payload.nonce !== expectedNonce ||
+    (requireNonce && payload.nonce !== expectedNonce) ||
     typeof payload.sub !== "string" ||
     !OIDC_SUBJECT_RE.test(payload.sub)
   ) {
@@ -458,15 +644,19 @@ async function verifyIdToken(
   return payload;
 }
 
-async function fetchUserInfo(accessToken: string, metadata: OidcDiscovery, fetcher: OidcFetch): Promise<Record<string, unknown>> {
+async function fetchUserInfo(accessToken: string, metadata: OidcDiscovery, fetcher: OidcFetch, transaction?: OidcTransactionClaims): Promise<Record<string, unknown>> {
+  const dpopHeader = transaction?.dpop_private_jwk && transaction?.dpop_public_jwk
+    ? await createDpopProof(transaction.dpop_private_jwk, transaction.dpop_public_jwk, "GET", metadata.userinfo_endpoint)
+    : undefined;
   return fetchJson(
     new URL(metadata.userinfo_endpoint),
     {
       method: "GET",
       headers: {
         Accept: "application/json",
-        Authorization: `Bearer ${accessToken}`,
+        Authorization: `${transaction?.dpop_private_jwk ? "DPoP" : "Bearer"} ${accessToken}`,
         "Cache-Control": "no-store",
+        ...(dpopHeader ? { DPoP: dpopHeader } : {}),
       },
     },
     fetcher,
@@ -487,24 +677,31 @@ export async function finishOidcAuthorization(
   env: Env,
   config: SsoRuntimeConfig,
   fetcher: OidcFetch = fetch,
-): Promise<{ identity: OidcIdentity; return_to: string }> {
+): Promise<{ identity: OidcIdentity; return_to: string; tokens: OidcTokenSet }> {
   if (!config.configured) throw new OidcError("SSO_NOT_CONFIGURED", 503);
   const url = new URL(request.url);
-  const state = exactParameter(url, "state", 512);
   const cookie = readCookie(request, transactionCookieName(request));
-  if (!state || !cookie) throw new OidcError("SSO_STATE_INVALID", 400);
+  if (!cookie) throw new OidcError("SSO_STATE_INVALID", 400);
   const transaction = await readTransactionCookie(cookie, env.DEV_TOKEN_SECRET);
-  if (transaction.state !== state || transaction.redirect_uri !== oidcRedirectUri(request, env)) {
-    throw new OidcError("SSO_STATE_INVALID", 400);
+  const metadata = await discover(config, fetcher);
+  let responseClaims: JWTPayload | null = null;
+  if (transaction.use_jarm) {
+    const response = exactParameter(url, "response", OIDC_TOKEN_MAX_BYTES);
+    if (!response) throw new OidcError("SSO_STATE_INVALID", 400);
+    responseClaims = await verifyJarm(response, config, metadata, fetcher);
   }
-  if (exactParameter(url, "error", 256)) throw new OidcError("SSO_PROVIDER_ERROR", 401);
-  const code = exactParameter(url, "code", 4096);
+  const state = responseClaims?.state && typeof responseClaims.state === "string"
+    ? responseClaims.state
+    : exactParameter(url, "state", 512);
+  if (!state || transaction.state !== state || transaction.redirect_uri !== oidcRedirectUri(request, env)) throw new OidcError("SSO_STATE_INVALID", 400);
+  const error = responseClaims?.error && typeof responseClaims.error === "string" ? responseClaims.error : exactParameter(url, "error", 256);
+  if (error) throw new OidcError("SSO_PROVIDER_ERROR", 401);
+  const code = responseClaims?.code && typeof responseClaims.code === "string" ? responseClaims.code : exactParameter(url, "code", 4096);
   if (!code) throw new OidcError("SSO_STATE_INVALID", 400);
 
-  const metadata = await discover(config, fetcher);
   const tokens = await exchangeCode(code, transaction, config, metadata, fetcher);
   const idToken = await verifyIdToken(tokens.id_token, transaction.nonce, config, metadata, fetcher);
-  const userInfo = await fetchUserInfo(tokens.access_token, metadata, fetcher);
+  const userInfo = await fetchUserInfo(tokens.access_token, metadata, fetcher, transaction);
   if (userInfo.sub !== idToken.sub) throw new OidcError("SSO_TOKEN_INVALID", 401);
   const rawEmail = typeof userInfo.email === "string" ? userInfo.email : idToken.email;
   const email = typeof rawEmail === "string" && rawEmail.length <= 254 && isValidEmail(rawEmail.trim()) ? rawEmail.trim() : null;
@@ -518,6 +715,7 @@ export async function finishOidcAuthorization(
       email_verified: email !== null && emailVerified,
     },
     return_to: transaction.return_to,
+    tokens,
   };
 }
 
@@ -569,13 +767,153 @@ export async function mapOidcIdentity(env: Env, identity: OidcIdentity): Promise
   throw new OidcError("SSO_IDENTITY_ERROR", 500);
 }
 
-export async function createOidcLoginCompletion(env: Env, localpart: string): Promise<string> {
+async function tokenCiphertext(value: string, secret: string): Promise<string> {
+  return new EncryptJWT({ value })
+    .setProtectedHeader({ alg: "dir", enc: "A256GCM" })
+    .setIssuedAt()
+    .setExpirationTime("31d")
+    .setJti(crypto.randomUUID())
+    .encrypt(await transactionKey(secret));
+}
+
+async function tokenPlaintext(value: string, secret: string): Promise<string> {
+  try {
+    const { payload, protectedHeader } = await jwtDecrypt<{ value?: string }>(value, await transactionKey(secret), {
+      keyManagementAlgorithms: ["dir"],
+      contentEncryptionAlgorithms: ["A256GCM"],
+      clockTolerance: 30,
+    });
+    if (protectedHeader.alg !== "dir" || protectedHeader.enc !== "A256GCM" || typeof payload.value !== "string") throw new Error("invalid token");
+    return payload.value;
+  } catch {
+    throw new OidcError("SSO_TOKEN_INVALID", 401);
+  }
+}
+
+function sessionJti(sessionToken: string): string | null {
+  try {
+    const [payload] = sessionToken.split(".");
+    const claims = JSON.parse(new TextDecoder().decode(base64UrlDecode(payload || ""))) as Partial<SessionTokenClaims>;
+    return claims.typ === "session" && typeof claims.jti === "string" ? claims.jti : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function storeOidcSession(
+  env: Env,
+  sessionToken: string,
+  localpart: string,
+  config: SsoRuntimeConfig,
+  tokens: OidcTokenSet,
+): Promise<void> {
+  const jti = sessionJti(sessionToken);
+  if (!jti) throw new OidcError("SSO_TOKEN_INVALID", 500);
+  const timestamp = nowS();
+  const refreshCiphertext = tokens.refresh_token ? await tokenCiphertext(tokens.refresh_token, env.DEV_TOKEN_SECRET) : null;
+  const idCiphertext = tokens.id_token ? await tokenCiphertext(tokens.id_token, env.DEV_TOKEN_SECRET) : null;
+  const dpopCiphertext = tokens.dpop_private_jwk && tokens.dpop_public_jwk
+    ? await tokenCiphertext(JSON.stringify({ private: tokens.dpop_private_jwk, public: tokens.dpop_public_jwk }), env.DEV_TOKEN_SECRET)
+    : null;
+  await env.DB.prepare(`
+    INSERT OR REPLACE INTO oidc_sessions
+      (session_jti, localpart, issuer, client_id, refresh_token_ciphertext, id_token_ciphertext,
+       dpop_key_ciphertext, access_token_expires_at, refresh_token_expires_at, created_at, updated_at, revoked_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM oidc_sessions WHERE session_jti = ?), ?), ?, NULL)
+  `).bind(jti, localpart, config.issuer, config.client_id, refreshCiphertext, idCiphertext, dpopCiphertext, tokens.expires_in ? timestamp + tokens.expires_in : null, refreshCiphertext ? timestamp + 30 * 24 * 60 * 60 : null, jti, timestamp, timestamp).run();
+}
+
+export async function refreshOidcSession(
+  env: Env,
+  session: SessionTokenClaims,
+  config: SsoRuntimeConfig,
+  fetcher: OidcFetch = fetch,
+): Promise<{ token: string; identity: OidcIdentity }> {
+  if (session.auth_source !== "sso") throw new OidcError("SSO_REQUIRED", 401);
+  const row = await env.DB.prepare(
+    `SELECT s.*, i.subject AS bound_subject
+       FROM oidc_sessions s
+       JOIN oidc_identities i ON i.issuer = s.issuer AND i.localpart = s.localpart
+      WHERE s.session_jti = ? AND s.revoked_at IS NULL`,
+  ).bind(session.jti).first<{ localpart: string; issuer: string; bound_subject: string; refresh_token_ciphertext: string | null; id_token_ciphertext: string | null; dpop_key_ciphertext: string | null }>();
+  if (!row?.refresh_token_ciphertext) throw new OidcError("SSO_REFRESH_UNAVAILABLE", 401);
+  const refreshToken = await tokenPlaintext(row.refresh_token_ciphertext, env.DEV_TOKEN_SECRET);
+  const metadata = await discover(config, fetcher);
+  const dpop = row.dpop_key_ciphertext ? JSON.parse(await tokenPlaintext(row.dpop_key_ciphertext, env.DEV_TOKEN_SECRET)) as { private?: JsonWebKey; public?: JsonWebKey } : null;
+  if (row.dpop_key_ciphertext && (!dpop?.private || !dpop.public)) throw new OidcError("SSO_TOKEN_INVALID", 401);
+  const body = new URLSearchParams({ grant_type: "refresh_token", refresh_token: refreshToken });
+  const dpopHeader = dpop?.private && dpop.public ? await createDpopProof(dpop.private, dpop.public, "POST", metadata.token_endpoint) : undefined;
+  const authHeaders = clientAuthenticationHeaders(config, metadata, body);
+  const payload = await fetchJson(new URL(metadata.token_endpoint), {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded", ...authHeaders, ...(dpopHeader ? { DPoP: dpopHeader } : {}) },
+    body,
+  }, fetcher, OIDC_TOKEN_MAX_BYTES);
+  if (typeof payload.access_token !== "string" || typeof payload.token_type !== "string" || !["bearer", "dpop"].includes(payload.token_type.toLowerCase())) throw new OidcError("SSO_TOKEN_INVALID", 401);
+  const expectedDpopJkt = dpop?.public ? await calculateJwkThumbprint(dpop.public, "sha256") : null;
+  if (expectedDpopJkt && (payload.token_type.toLowerCase() !== "dpop" || !dpopConfirmationMatches(payload.cnf, expectedDpopJkt))) throw new OidcError("SSO_TOKEN_INVALID", 401);
+  if (!expectedDpopJkt && payload.token_type.toLowerCase() === "dpop") throw new OidcError("SSO_TOKEN_INVALID", 401);
+  const idToken = typeof payload.id_token === "string" ? payload.id_token : null;
+  const idClaims: JWTPayload = idToken
+    ? await verifyIdToken(idToken, "", config, metadata, fetcher, false)
+    : { sub: row.bound_subject };
+  if (typeof idClaims.sub !== "string" || idClaims.sub !== row.bound_subject) throw new OidcError("SSO_TOKEN_INVALID", 401);
+  const identity: OidcIdentity = { issuer: config.issuer, subject: idClaims.sub, display_name: preferredDisplayName(idClaims, {}), email: typeof idClaims.email === "string" && isValidEmail(idClaims.email) ? idClaims.email : null, email_verified: idClaims.email_verified === true };
+  const newRefresh = typeof payload.refresh_token === "string" ? payload.refresh_token : refreshToken;
+  const accessTokenExpiresAt = typeof payload.expires_in === "number" ? nowS() + payload.expires_in : null;
+  await env.DB.prepare("UPDATE oidc_sessions SET refresh_token_ciphertext = ?, id_token_ciphertext = ?, access_token_expires_at = ?, refresh_token_expires_at = ?, updated_at = ? WHERE session_jti = ? AND revoked_at IS NULL").bind(await tokenCiphertext(newRefresh, env.DEV_TOKEN_SECRET), idToken ? await tokenCiphertext(idToken, env.DEV_TOKEN_SECRET) : row.id_token_ciphertext, accessTokenExpiresAt, nowS() + 30 * 24 * 60 * 60, nowS(), session.jti).run();
+  const token = await signToken({ ...session, exp: nowS() + 24 * 60 * 60, jti: crypto.randomUUID() }, env.DEV_TOKEN_SECRET);
+  await env.DB.prepare("UPDATE oidc_sessions SET session_jti = ?, updated_at = ? WHERE session_jti = ?").bind(sessionJti(token), nowS(), session.jti).run();
+  return { token, identity };
+}
+
+function dpopConfirmation(value: unknown): { jkt: string } | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const jkt = (value as { jkt?: unknown }).jkt;
+  return typeof jkt === "string" && /^[A-Za-z0-9_-]{43,128}$/.test(jkt) ? { jkt } : undefined;
+}
+
+function dpopConfirmationMatches(value: unknown, expected: string): boolean {
+  return dpopConfirmation(value)?.jkt === expected;
+}
+
+export async function revokeOidcSession(env: Env, session: SessionTokenClaims): Promise<void> {
+  if (session.auth_source !== "sso") return;
+  await env.DB.prepare("UPDATE oidc_sessions SET revoked_at = ?, updated_at = ? WHERE session_jti = ? AND revoked_at IS NULL").bind(nowS(), nowS(), session.jti).run();
+}
+
+export async function oidcLogoutUrl(
+  env: Env,
+  session: SessionTokenClaims,
+  config: SsoRuntimeConfig,
+  postLogoutRedirectUri: string,
+  fetcher: OidcFetch = fetch,
+): Promise<string | null> {
+  if (session.auth_source !== "sso") return null;
+  const row = await env.DB.prepare("SELECT id_token_ciphertext FROM oidc_sessions WHERE session_jti = ? AND revoked_at IS NULL").bind(session.jti).first<{ id_token_ciphertext: string | null }>();
+  if (!row?.id_token_ciphertext) return null;
+  const idToken = await tokenPlaintext(row.id_token_ciphertext, env.DEV_TOKEN_SECRET);
+  const metadata = await discover(config, fetcher);
+  if (!metadata.end_session_endpoint) return null;
+  const url = new URL(metadata.end_session_endpoint);
+  url.searchParams.set("id_token_hint", idToken);
+  url.searchParams.set("post_logout_redirect_uri", postLogoutRedirectUri);
+  url.searchParams.set("state", randomBase64Url(24));
+  return url.toString();
+}
+
+export async function createOidcLoginCompletion(env: Env, localpart: string, config?: SsoRuntimeConfig, tokens?: OidcTokenSet): Promise<string> {
   await env.DB.prepare("DELETE FROM oidc_login_completions WHERE expires_at <= ?").bind(nowS()).run();
   for (let attempt = 0; attempt < 4; attempt++) {
     const code = randomBase64Url(32);
     try {
-      await env.DB.prepare("INSERT INTO oidc_login_completions (code_hash, localpart, expires_at) VALUES (?, ?, ?)")
-        .bind(await sha256Base64Url(code), localpart, nowS() + LOGIN_COMPLETION_TTL_S)
+      const refreshCiphertext = config && tokens?.refresh_token ? await tokenCiphertext(tokens.refresh_token, env.DEV_TOKEN_SECRET) : null;
+      const idCiphertext = config && tokens?.id_token ? await tokenCiphertext(tokens.id_token, env.DEV_TOKEN_SECRET) : null;
+      const dpopCiphertext = config && tokens?.dpop_private_jwk && tokens.dpop_public_jwk
+        ? await tokenCiphertext(JSON.stringify({ private: tokens.dpop_private_jwk, public: tokens.dpop_public_jwk }), env.DEV_TOKEN_SECRET)
+        : null;
+      await env.DB.prepare("INSERT INTO oidc_login_completions (code_hash, localpart, expires_at, refresh_token_ciphertext, id_token_ciphertext, dpop_key_ciphertext, token_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .bind(await sha256Base64Url(code), localpart, nowS() + LOGIN_COMPLETION_TTL_S, refreshCiphertext, idCiphertext, dpopCiphertext, tokens?.expires_in ? nowS() + tokens.expires_in : null)
         .run();
       return code;
     } catch {
@@ -586,12 +924,29 @@ export async function createOidcLoginCompletion(env: Env, localpart: string): Pr
 }
 
 export async function consumeOidcLoginCompletion(env: Env, code: string): Promise<string | null> {
+  const details = await consumeOidcLoginCompletionDetails(env, code);
+  return details?.localpart ?? null;
+}
+
+export async function consumeOidcLoginCompletionDetails(env: Env, code: string): Promise<{
+  localpart: string;
+  refresh_token_ciphertext: string | null;
+  id_token_ciphertext: string | null;
+  dpop_key_ciphertext: string | null;
+  token_expires_at: number | null;
+} | null> {
   if (!code || code.length > 512) return null;
   await env.DB.prepare("DELETE FROM oidc_login_completions WHERE expires_at <= ?").bind(nowS()).run();
   const row = await env.DB.prepare(
-    "DELETE FROM oidc_login_completions WHERE code_hash = ? AND expires_at > ? RETURNING localpart",
-  ).bind(await sha256Base64Url(code), nowS()).first<{ localpart: string }>();
-  return row?.localpart ?? null;
+    "DELETE FROM oidc_login_completions WHERE code_hash = ? AND expires_at > ? RETURNING localpart, refresh_token_ciphertext, id_token_ciphertext, dpop_key_ciphertext, token_expires_at",
+  ).bind(await sha256Base64Url(code), nowS()).first<{
+    localpart: string;
+    refresh_token_ciphertext: string | null;
+    id_token_ciphertext: string | null;
+    dpop_key_ciphertext: string | null;
+    token_expires_at: number | null;
+  }>();
+  return row ?? null;
 }
 
 export function oidcLoginCompletionRedirect(request: Request, env: Env, returnTo: string, code: string): Response {
