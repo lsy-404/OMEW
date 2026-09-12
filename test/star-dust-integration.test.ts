@@ -18,6 +18,7 @@ describe("OMEW authentication boundary", () => {
     expect(stardustConfig).toContain('"SSO_CLIENT_ID": "stardust-omew"');
     expect(stardustConfig).toContain('"SSO_PROVIDER_NAME": "星尘粉丝站"');
     expect(stardustConfig).toContain('"SSO_USE_PAR": "1"');
+    expect(stardustConfig).toContain("global_fetch_strictly_public");
     expect(stardustConfig).not.toContain("SSO_CLIENT_SECRET");
     expect(stardustConfig).not.toContain("STAR_DUST_SSO_SECRET");
   });

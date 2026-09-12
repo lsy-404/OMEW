@@ -62,6 +62,7 @@ try {
   assert.match(manifest.terms.texts.en, /Only when you provide a custom domain does it also require read and route-write permissions for the corresponding zone/);
   assert.match(manifest.terms.texts.en, /account-scoped and can technically modify other Workers in the same account/);
   assert.deepEqual(manifest.authModes, ["auto"]);
+  assert.deepEqual(manifest.worker.compatibilityFlags, ["nodejs_compat", "global_fetch_strictly_public"]);
   assert.deepEqual(manifest.worker.vars, [
     { name: "INSTANCE_DOMAIN", value: "${input:domain}" },
     { name: "R2_BUCKET_NAME", value: "${resource:media}" },
