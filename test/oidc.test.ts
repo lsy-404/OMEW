@@ -119,4 +119,49 @@ describe("OMEW OIDC client", () => {
     expect(await consumeOidcLoginCompletion(env, completion)).toBe(first.localpart);
     expect(await consumeOidcLoginCompletion(env, completion)).toBeNull();
   });
+
+  it("negotiates client_secret_post when the provider does not publish Basic", async () => {
+    const discovery = {
+      issuer: ISSUER,
+      authorization_endpoint: `${ISSUER}/authorize`,
+      token_endpoint: `${ISSUER}/token`,
+      userinfo_endpoint: `${ISSUER}/userinfo`,
+      jwks_uri: `${ISSUER}/jwks.json`,
+      response_types_supported: ["code"],
+      scopes_supported: ["openid", "profile", "email"],
+      code_challenge_methods_supported: ["S256"],
+      token_endpoint_auth_methods_supported: ["client_secret_post"],
+      id_token_signing_alg_values_supported: ["RS256"],
+    };
+    const start = await beginOidcAuthorization(new Request("http://localhost/api/auth/oidc/start?return_to=%2F"), env, getSsoConfig(env), async (input) => {
+      expect(String(input)).toBe(`${ISSUER}/.well-known/openid-configuration`);
+      return Response.json(discovery);
+    });
+    const location = new URL(start.headers.get("Location")!);
+    const idToken = await new SignJWT({ nonce: location.searchParams.get("nonce"), name: "Post Client", email: "post@example.com", email_verified: true })
+      .setProtectedHeader({ alg: "RS256", kid: "provider-key" })
+      .setIssuer(ISSUER)
+      .setSubject("post-subject")
+      .setAudience(CLIENT_ID)
+      .setIssuedAt()
+      .setExpirationTime("5m")
+      .sign(privateKey);
+    let tokenBody: URLSearchParams | null = null;
+    const cookie = start.headers.get("Set-Cookie")!.split(";", 1)[0]!;
+    const finish = await finishOidcAuthorization(new Request(`http://localhost/api/auth/oidc/callback?code=post-code&state=${encodeURIComponent(location.searchParams.get("state")!)}`, { headers: { Cookie: cookie } }), env, getSsoConfig(env), async (input, init) => {
+      const url = String(input);
+      if (url === `${ISSUER}/.well-known/openid-configuration`) return Response.json(discovery);
+      if (url === `${ISSUER}/token`) {
+        tokenBody = new URLSearchParams(String(init?.body || ""));
+        expect(new Headers(init?.headers).get("Authorization")).toBeNull();
+        return Response.json({ access_token: "post-access", token_type: "Bearer", id_token: idToken });
+      }
+      if (url === `${ISSUER}/jwks.json`) return Response.json({ keys: [publicJwk] });
+      if (url === `${ISSUER}/userinfo`) return Response.json({ sub: "post-subject", preferred_username: "post-user" });
+      throw new Error(`unexpected upstream URL: ${url}`);
+    });
+    expect(tokenBody?.get("client_id")).toBe(CLIENT_ID);
+    expect(tokenBody?.get("client_secret")).toBe(CLIENT_SECRET);
+    expect(finish.identity.subject).toBe("post-subject");
+  });
 });

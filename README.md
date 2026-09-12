@@ -16,6 +16,8 @@ Open-source, self-hostable community platform built around strongholds, realtime
 
 OMEW 使用标准 OIDC Authorization Code + PKCE 接入统一登录。Worker 环境变量 `SSO_MODE` 可设为 `disabled`（关闭，默认）、`optional`（允许 SSO 与本地登录）或 `required`（仅允许 SSO）；启用时还需配置 `SSO_ISSUER`、`SSO_CLIENT_ID`，并把 `SSO_CLIENT_SECRET` 作为 Worker Secret 写入。OMEW 通过 Issuer 的 discovery 文档发现授权端点和签名密钥，不绑定任何特定站点。
 
+客户端会协商并支持 Refresh Token 轮换、RP-Initiated Logout、PAR、JAR/JARM、DPoP；其中 PAR 在提供方声明后默认启用，JARM 与 DPoP 通过 `SSO_USE_JARM=1` / `SSO_USE_DPOP=1` 开启，JAR 还需要把 `SSO_JAR_PRIVATE_JWK` 的对应公钥登记到提供方。Device Authorization、CIBA、SAML 2.0 和 SCIM 2.0 的 provider/供应职责由共享协议提供方承担，OMEW 不把这些管理协议伪装成浏览器登录功能。
+
 若只运行一个据点，可将 `INSTANCE_MODE=single` 与 `ROOT_STRONGHOLD=<据点短名>` 一起设置。该模式会把指定据点作为 `/` 的主内容，隐藏首页和据点导航栏，并拒绝其他据点的访问、创建、删除与转让；`INSTANCE_MODE=multi` 保留普通多据点首页。
 
 ## 文档 / Docs
