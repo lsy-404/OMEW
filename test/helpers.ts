@@ -42,6 +42,10 @@ function splitStatements(sql: string): string[] {
 }
 
 export async function ensureMigrated(): Promise<void> {
+  // Existing API fixtures create temporary strongholds freely; production's
+  // deployment default is restricted and policy tests override this explicitly.
+  env.STRONGHOLD_CREATION = "open";
+  env.STRONGHOLD_CREATORS = "";
   const marker = await env.DB.prepare(
     "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'instance_config'"
   ).first();

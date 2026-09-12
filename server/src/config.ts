@@ -45,7 +45,7 @@ function parseRootRequirements(value: string | undefined): RootRequirement[] {
 const STRONGHOLD_CREATION_POLICIES: readonly StrongholdCreationPolicy[] = ["open", "restricted", "application"];
 function parseStrongholdCreation(value: string | undefined): StrongholdCreationPolicy {
   const v = value?.trim();
-  return v && (STRONGHOLD_CREATION_POLICIES as readonly string[]).includes(v) ? (v as StrongholdCreationPolicy) : "open";
+  return v && (STRONGHOLD_CREATION_POLICIES as readonly string[]).includes(v) ? (v as StrongholdCreationPolicy) : "restricted";
 }
 
 export function getInstanceConfig(env: Env): InstanceConfig {

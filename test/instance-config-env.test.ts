@@ -21,7 +21,7 @@ describe("getInstanceConfig: defaults", () => {
       max_file_bytes: 10_485_760,
       user_storage_quota_bytes: 209_715_200,
       federation_peers: [],
-      stronghold_creation_policy: "open",
+      stronghold_creation_policy: "restricted",
       stronghold_creators: [],
       allow_guest_browsing: true,
     });
@@ -67,8 +67,8 @@ describe("getInstanceConfig: comma-separated list parsing", () => {
 });
 
 describe("getInstanceConfig: enum parsing", () => {
-  it("falls back to 'open' on an unrecognized stronghold_creation_policy", () => {
-    expect(getInstanceConfig(envWith({ STRONGHOLD_CREATION: "invited-only" })).stronghold_creation_policy).toBe("open");
+  it("falls back to 'restricted' on an unrecognized stronghold_creation_policy", () => {
+    expect(getInstanceConfig(envWith({ STRONGHOLD_CREATION: "invited-only" })).stronghold_creation_policy).toBe("restricted");
   });
 
   it("accepts every documented enum value", () => {
