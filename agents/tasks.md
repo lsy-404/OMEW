@@ -11,3 +11,5 @@
 | 115 | [Fix] Overture 权限声明 | 按实际部署调用声明完整 OAuth scopes 与长期 API Token 最小权限 | 当前清单少报读取、绑定、存储和域名权限，导致授权范围与实际访问不一致 | ✅ 已完成并覆盖发布 1.0.0 |
 | 116 | [Fix] WorkersDev实例域 | 在未设自定义域的 Workers 部署中，从真实 workers.dev 请求安全解析实例身份，并贯通 HTTP、WebAuthn 与 Durable Object/WebSocket | 空 INSTANCE_DOMAIN 会让公开实例错误退回 local/localhost | ✅ 已完成 |
 | 117 | [Fix] 可选自定义域 | 将 Overture 的实例自定义域输入及对应权限改为可选 | OMEW 应能直接使用 workers.dev，不应强制部署者拥有或绑定自定义域 | ✅ 已完成并覆盖发布 1.0.0 |
+| 118 | [Feature] 星尘站身份桥接与据点策略 | 原方案：让嵌入星尘站的 OMEW 复用星尘用户身份 | Rosmontis 改为要求每位使用者自行部署 OMEW；跨实例 SSO 方案不再适用 | ❌ 已废弃 |
+| 119 | [Fix] 默认据点创建策略 | 将 OMEW 默认部署配置与解析安全默认改为 restricted，普通用户不能直接新建据点 | 自部署实例不应默认开放创建，避免每个实例上线后立即被任意用户创建据点 | ✅ 已完成并发布 v1.0.1 |
