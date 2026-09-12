@@ -58,6 +58,11 @@ async function loginPasskey(response: AuthenticationResponseJSON, challengeToken
   setSession(session)
 }
 
+async function loginWithStarDust(bridgeToken: string) {
+  const session = await api.exchangeStarDustSession(bridgeToken)
+  setSession(session)
+}
+
 // register() intentionally does NOT commit the session by itself — the
 // caller (registration form) shows the ownership-key backup step first and
 // commits explicitly via setSession() once the user has seen it.
@@ -98,6 +103,7 @@ export function useAuth() {
     login,
     loginTotp,
     loginPasskey,
+    loginWithStarDust,
     register,
     setSession,
     updateUser,

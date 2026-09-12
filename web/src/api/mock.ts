@@ -801,6 +801,10 @@ export class MockRoomTransport implements RoomTransport {
 }
 
 export const mockApi = {
+  async exchangeStarDustSession(): Promise<never> {
+    throw new ApiRequestError('SSO_NOT_CONFIGURED', 503)
+  },
+
   async getInstanceConfig() {
     return delay({
       allow_root: config.allow_root,

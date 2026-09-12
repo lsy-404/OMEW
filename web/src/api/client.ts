@@ -243,6 +243,12 @@ function optionalAuthHeaders(token: string | null): HeadersInit | undefined {
 export const realApi = {
   getInstanceConfig: () => request<InstanceConfig>('/api/instance/config'),
 
+  exchangeStarDustSession: (bridgeToken: string) =>
+    request<AuthResponse>('/api/integration/star-dust/session', {
+      method: 'POST',
+      body: JSON.stringify({ token: bridgeToken }),
+    }),
+
   getDirectory: () => request<{ strongholds: DirectoryEntry[] }>('/api/directory').then((r) => r.strongholds),
 
   register: (payload: RegisterPayload) =>

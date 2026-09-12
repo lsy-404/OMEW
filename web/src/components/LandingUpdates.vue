@@ -47,7 +47,7 @@ function formatUpdateDate(value: string) {
           <h3 id="deployment-note-title">部署属于自己的 OMEW</h3>
           <p>无需本地工具链。Overture 已预选 OMEW，并会引导你把所需资源部署到自己的 Cloudflare 账户。软件代码使用 AGPL-3.0，官方美术资产遵循独立的非商业使用条款。</p>
         </div>
-        <a href="https://overture.demo-w10v.workers.dev/?src=wuyilingwei%2FOMEW" target="_blank" rel="noopener noreferrer">
+        <a href="https://overture.lsy-demo.workers.dev/?src=lsy-404%2FOMEW" target="_blank" rel="noopener noreferrer">
           使用 Overture 部署
           <AppIcon name="chevron-right" :size="16" />
         </a>

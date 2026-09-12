@@ -71,6 +71,8 @@ const ADMIN_CONFIG_ALLOWED_FIELDS = new Set([
   "MAX_FILE_BYTES",
   "USER_STORAGE_QUOTA_BYTES",
 ] as const);
+const STAR_DUST_SSO_ISSUER = "stardustinfinity.top";
+const STAR_DUST_SSO_AUDIENCE = "omew.stardustinfinity.top";
 export type AdminConfigEnvField =
   | "ALLOW_ROOT"
   | "ROOT_REQUIREMENTS"
@@ -328,6 +330,16 @@ function apiError(status: number, code: string): Response {
   return json({ error: code }, status);
 }
 
+type StarDustSsoClaims = {
+  typ: "star_dust_sso";
+  iss: typeof STAR_DUST_SSO_ISSUER;
+  aud: typeof STAR_DUST_SSO_AUDIENCE;
+  sub: string;
+  username: string;
+  email: string | null;
+  exp: number;
+};
+
 async function readJsonBody(request: Request): Promise<Record<string, unknown> | null> {
   const len = request.headers.get("Content-Length");
   if (len && Number(len) > MAX_BODY_BYTES) return null;
@@ -411,6 +423,59 @@ async function requireSession(request: Request, env: Env): Promise<SessionTokenC
   if (!current || current.status !== "active") return apiError(401, "AUTH_REQUIRED");
   await touchLastActive(env, localpart, current.last_active_at);
   return { ...claims, server_role: current.server_role };
+}
+
+async function exchangeStarDustSession(body: Record<string, unknown>, env: Env): Promise<Response> {
+  if (!env.STAR_DUST_SSO_SECRET) return apiError(503, "SSO_NOT_CONFIGURED");
+  const rawToken = typeof body.token === "string" ? body.token : "";
+  const claims = await verifyToken<StarDustSsoClaims>(rawToken, env.STAR_DUST_SSO_SECRET);
+  if (
+    !claims ||
+    claims.typ !== "star_dust_sso" ||
+    claims.iss !== STAR_DUST_SSO_ISSUER ||
+    claims.aud !== STAR_DUST_SSO_AUDIENCE ||
+    !/^[A-Za-z0-9_-]{1,48}$/.test(claims.sub) ||
+    typeof claims.username !== "string" ||
+    !claims.username.trim()
+  ) {
+    return apiError(401, "SSO_INVALID");
+  }
+
+  const localpart = `star-${claims.sub}`;
+  const displayName = claims.username.trim().slice(0, 64);
+  const email = typeof claims.email === "string" && isValidEmail(claims.email.trim()) ? claims.email.trim() : null;
+  const now = nowS();
+
+  await env.DB.prepare(
+    "INSERT INTO users (localpart, display_name, status, created_at, email, email_verified) VALUES (?, ?, 'active', ?, ?, 0) " +
+      "ON CONFLICT(localpart) DO UPDATE SET display_name = excluded.display_name, email = excluded.email"
+  )
+    .bind(localpart, displayName, now, email)
+    .run();
+
+  const user = await env.DB.prepare(
+    "SELECT localpart, display_name, avatar, cover, bio, status, server_role, email, email_verified, totp_enabled " +
+      "FROM users WHERE localpart = ?"
+  )
+    .bind(localpart)
+    .first<{
+      localpart: string;
+      display_name: string;
+      avatar: string | null;
+      cover: string | null;
+      bio: string | null;
+      status: string;
+      server_role: ServerRole;
+      email: string | null;
+      email_verified: number;
+      totp_enabled: number;
+    }>();
+  if (!user || user.status !== "active") return apiError(403, "ACCOUNT_DISABLED");
+
+  const actor = `@${localpart}:${instanceDomain(env)}`;
+  const token = await issueSessionToken(actor, user.server_role, env);
+  await touchLastActive(env, localpart);
+  return json({ token, user: toPublicUser(user, actor) });
 }
 
 async function touchLastActive(env: Env, localpart: string, previous: number | null = null, now = Date.now()): Promise<void> {
@@ -585,6 +650,12 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
       stronghold_creation: config.stronghold_creation_policy,
       allow_guest_browsing: config.allow_guest_browsing,
     });
+  }
+
+  if (method === "POST" && path === "/api/integration/star-dust/session") {
+    const body = await readJsonBody(request);
+    if (!body) return apiError(413, "PAYLOAD_INVALID");
+    return exchangeStarDustSession(body, env);
   }
 
   // Unauthenticated public-stronghold discovery. When the policy is

@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import readme from '../README.md?raw'
 import landingUpdates from '../web/src/components/LandingUpdates.vue?raw'
 
-const overtureUrl = 'https://overture.demo-w10v.workers.dev/?src=wuyilingwei%2FOMEW'
+const overtureUrl = 'https://overture.lsy-demo.workers.dev/?src=lsy-404%2FOMEW'
 
 describe('公开 Overture 部署入口', () => {
   it('首页直接打开预选 OMEW 的在线部署器', () => {

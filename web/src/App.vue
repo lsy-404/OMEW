@@ -46,6 +46,24 @@ useDocumentTitle(isHome)
 // directly in its read-only guest state (useStronghold's isGuestMode).
 const showAuthGate = computed(() => !auth.isAuthenticated.value && !instanceConfig.value?.allow_guest_browsing)
 const showLanding = computed(() => isHome.value)
+const STAR_DUST_ORIGIN = 'https://stardustinfinity.top'
+let lastStarDustBridgeToken: string | null = null
+
+async function handleStarDustSession(event: MessageEvent) {
+  if (event.origin !== STAR_DUST_ORIGIN || event.source !== window.parent) return
+  if (event.data?.type !== 'star-dust-session' || typeof event.data.token !== 'string') return
+  if (event.data.token === lastStarDustBridgeToken && auth.isAuthenticated.value) return
+  lastStarDustBridgeToken = event.data.token
+  try {
+    await auth.loginWithStarDust(event.data.token)
+  } catch {
+    lastStarDustBridgeToken = null
+  }
+}
+
+function announceEmbeddedReady() {
+  if (window.parent !== window) window.parent.postMessage({ type: 'omew-ready' }, STAR_DUST_ORIGIN)
+}
 
 function installRoute(strongholdId?: string, strongholdSlug?: string) {
   if (strongholdSlug && location.pathname === '/') {
@@ -80,8 +98,15 @@ watch(auth.isAuthenticated, (authenticated) => {
   }
 })
 
-onMounted(() => window.addEventListener('popstate', syncHomeFromAddress))
-onBeforeUnmount(() => window.removeEventListener('popstate', syncHomeFromAddress))
+onMounted(() => {
+  window.addEventListener('popstate', syncHomeFromAddress)
+  window.addEventListener('message', handleStarDustSession)
+  announceEmbeddedReady()
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('popstate', syncHomeFromAddress)
+  window.removeEventListener('message', handleStarDustSession)
+})
 </script>
 
 <template>
