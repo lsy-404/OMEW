@@ -67,6 +67,7 @@ describe("OMEW OIDC client", () => {
     const idToken = await new SignJWT({
       nonce,
       name: "统一用户",
+      preferred_username: "sso-user",
       email: "sso-user@example.com",
       email_verified: true,
     })
@@ -99,6 +100,7 @@ describe("OMEW OIDC client", () => {
     expect(finish.identity).toMatchObject({
       issuer: ISSUER,
       subject: "provider-user",
+      username: "sso-user",
       display_name: "sso-user",
       email: "sso-user@example.com",
       email_verified: true,
@@ -118,6 +120,7 @@ describe("OMEW OIDC client", () => {
     const identity = {
       issuer: ISSUER,
       subject: "stable-subject",
+      username: "stable-user",
       display_name: "Stable User",
       email: "stable@example.com",
       email_verified: true,
@@ -125,9 +128,30 @@ describe("OMEW OIDC client", () => {
     const first = await mapOidcIdentity(env, identity);
     const second = await mapOidcIdentity(env, identity);
     expect(second.localpart).toBe(first.localpart);
+    expect(second.username).toBe("stable-user");
+    expect(second.display_name).toBe("Stable User");
     const completion = await createOidcLoginCompletion(env, first.localpart);
     expect(await consumeOidcLoginCompletion(env, completion)).toBe(first.localpart);
     expect(await consumeOidcLoginCompletion(env, completion)).toBeNull();
+  });
+
+  it("uses the provider username as the new local username and rejects collisions", async () => {
+    const identity = {
+      issuer: ISSUER,
+      subject: "direct-username-subject",
+      username: "direct-user",
+      display_name: "Direct User",
+      email: null,
+      email_verified: false,
+    };
+    const mapped = await mapOidcIdentity(env, identity);
+    expect(mapped.localpart).toBe("direct-user");
+    expect(mapped.username).toBe("direct-user");
+
+    await expect(mapOidcIdentity(env, {
+      ...identity,
+      subject: "conflicting-subject",
+    })).rejects.toMatchObject({ code: "SSO_USERNAME_CONFLICT", status: 409 });
   });
 
   it("negotiates client_secret_post when the provider does not publish Basic", async () => {

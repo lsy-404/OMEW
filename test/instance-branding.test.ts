@@ -8,6 +8,7 @@ function envWith(vars: Record<string, string | undefined>): Env {
 describe("getInstanceBranding", () => {
   it("keeps generic deployments on the default logo and enabled capabilities", () => {
     expect(getInstanceBranding(envWith({}))).toEqual({
+      instance_name: "OMEW",
       logo_url: null,
       emotes_enabled: true,
       builtin_emotes_enabled: true,
@@ -20,6 +21,7 @@ describe("getInstanceBranding", () => {
     expect(
       getInstanceBranding(
         envWith({
+          INSTANCE_NAME: "论坛",
           INSTANCE_LOGO_URL: "https://stardustinfinity.top/favicon.svg",
           ENABLE_EMOTES: "0",
           USE_BUILTIN_EMOTES: "0",
@@ -28,6 +30,7 @@ describe("getInstanceBranding", () => {
         }),
       ),
     ).toEqual({
+      instance_name: "论坛",
       logo_url: "https://stardustinfinity.top/favicon.svg",
       emotes_enabled: false,
       builtin_emotes_enabled: false,

@@ -7,6 +7,7 @@ import LandingUpdates from './LandingUpdates.vue'
 import LandingWorld from './LandingWorld.vue'
 
 const props = defineProps<{
+  instanceName: string
   authenticated: boolean
   guestBrowsingAllowed: boolean
   logoUrl: string | null
@@ -59,9 +60,9 @@ watch(
 
     <div class="landing-page__hero-screen">
       <header class="landing-page__header">
-        <a class="landing-page__brand" href="/" aria-label="OMEW 首页">
+        <a class="landing-page__brand" href="/" :aria-label="`${instanceName} 首页`">
           <img v-if="logoUrl" :src="logoUrl" alt="" aria-hidden="true" />
-          <span>OMEW</span>
+          <span>{{ instanceName }}</span>
         </a>
       </header>
 

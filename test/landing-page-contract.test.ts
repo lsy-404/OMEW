@@ -174,15 +174,14 @@ describe('OMEW landing page contract', () => {
   })
 
   it('keeps the root page title independent of the selected stronghold', () => {
-    expect(app).toMatch(/useDocumentTitle\(isHome\)/)
-    expect(documentTitleSource).toMatch(
-      /!isHome\?\.value[\s\S]{0,140}`OMEW - \$\{currentName\.value\}`\s*:\s*['"]OMEW['"]/,
-    )
+    expect(app).toContain('useDocumentTitle(isHome, instanceName)')
+    expect(documentTitleSource).toContain("const name = instanceName?.value?.trim() || 'OMEW'")
+    expect(documentTitleSource).toContain('`${name} - ${currentName.value}`')
   })
 
   it('makes the desktop logo and mobile home entry return to the root homepage', () => {
     expect(nodeRail).toContain('href="/"')
-    expect(nodeRail).toContain('返回 OMEW 首页')
+    expect(nodeRail).toContain(':title="`返回 ${instanceName} 首页`"')
     expect(nodeRail).not.toMatch(/node-rail__logo[\s\S]{0,160}@click="showDirectory\s*=\s*true"/)
     expect(mobileNav).toMatch(/class="mobile-nav__item mobile-nav__item--home"\s+href="\/"/)
     expect(mobileNav).toContain('首页')

@@ -5,6 +5,7 @@
 // the top-level `interface Env` merges with the generated global one.
 
 interface Env {
+  ASSETS: Fetcher;
   DEV_TOKEN_SECRET: string;
   SSO_MODE?: string;
   SSO_ISSUER?: string;
@@ -17,6 +18,8 @@ interface Env {
   SSO_JAR_PRIVATE_JWK?: string;
   INSTANCE_MODE?: string;
   ROOT_STRONGHOLD?: string;
+  INSTANCE_NAME?: string;
+  EMBED_ORIGIN?: string;
   INSTANCE_LOGO_URL?: string;
   ENABLE_EMOTES?: string;
   USE_BUILTIN_EMOTES?: string;
@@ -28,6 +31,7 @@ interface Env {
 
 declare namespace Cloudflare {
   interface Env {
+    ASSETS: Fetcher;
     DEV_TOKEN_SECRET: string;
     SSO_MODE?: string;
     SSO_ISSUER?: string;
@@ -40,6 +44,8 @@ declare namespace Cloudflare {
     SSO_JAR_PRIVATE_JWK?: string;
     INSTANCE_MODE?: string;
     ROOT_STRONGHOLD?: string;
+    INSTANCE_NAME?: string;
+    EMBED_ORIGIN?: string;
     INSTANCE_LOGO_URL?: string;
     ENABLE_EMOTES?: string;
     USE_BUILTIN_EMOTES?: string;

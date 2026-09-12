@@ -15,6 +15,8 @@ describe("single stronghold instance mode", () => {
     await ensureMigrated();
     env.INSTANCE_MODE = "single";
     env.ROOT_STRONGHOLD = "medium5";
+    env.INSTANCE_NAME = "论坛";
+    env.EMBED_ORIGIN = "https://stardustinfinity.top";
     env.USE_ART_ASSETS = "0";
     env.USE_BUILTIN_EMOTES = "0";
     await env.STRONGHOLD_DO.getByName("root-id").ensureConfigWithDefaults(
@@ -41,6 +43,8 @@ describe("single stronghold instance mode", () => {
     await stronghold.purgeForStrongholdDeletion();
     env.INSTANCE_MODE = "multi";
     env.ROOT_STRONGHOLD = "";
+    env.INSTANCE_NAME = undefined;
+    env.EMBED_ORIGIN = undefined;
     env.USE_ART_ASSETS = undefined;
     env.USE_BUILTIN_EMOTES = undefined;
   });
@@ -50,6 +54,7 @@ describe("single stronghold instance mode", () => {
     expect(configResponse.status).toBe(200);
     expect(await configResponse.json()).toMatchObject({
       instance_mode: "single",
+      instance_name: "论坛",
       root_stronghold: { id: "root-id", name: "Configured root", slug: "medium5" },
       logo_url: null,
       emotes_enabled: true,
@@ -109,5 +114,22 @@ describe("single stronghold instance mode", () => {
     expect(response.status).toBe(404);
     expect(await response.json()).toEqual({ error: "FEATURE_DISABLED" });
     env.ENABLE_EMOTES = undefined;
+  });
+
+  it("allows the StarDust iframe while rejecting direct document navigation", async () => {
+    const embedded = await worker.fetch(new Request("https://omew.stardustinfinity.top/", {
+      headers: {
+        Referer: "https://stardustinfinity.top/",
+        "Sec-Fetch-Dest": "iframe",
+        "Sec-Fetch-Site": "cross-site",
+      },
+    }), env);
+    expect(embedded.status).not.toBe(403);
+
+    const direct = await worker.fetch(new Request("https://omew.stardustinfinity.top/", {
+      headers: { "Sec-Fetch-Dest": "document", "Sec-Fetch-Site": "none" },
+    }), env);
+    expect(direct.status).toBe(403);
+    expect(await direct.text()).toContain("仅在星尘粉丝站内提供");
   });
 });

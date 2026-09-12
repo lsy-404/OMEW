@@ -823,6 +823,7 @@ export const mockApi = {
 
     async getInstanceConfig() {
     return delay({
+      instance_name: 'OMEW',
       instance_mode: config.instance_mode,
       root_stronghold: config.root_stronghold
         ? { id: config.root_stronghold, name: config.root_stronghold, slug: config.root_stronghold }

@@ -53,6 +53,7 @@ export function isOriginTrusted(config: InstanceConfig, origin: string): boolean
 export function toPublicUser(
   row: {
     localpart: string;
+    username?: string | null;
     display_name?: string | null;
     avatar?: string | null;
     cover?: string | null;
@@ -65,7 +66,7 @@ export function toPublicUser(
   actor: string
 ): PublicUser {
   return {
-    username: row.localpart,
+    username: row.username || row.localpart,
     // rows predating the display-name column, and the registration path (which
     // writes the localpart as the initial display name), both fall back to it.
     display_name: row.display_name || row.localpart,

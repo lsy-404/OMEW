@@ -26,6 +26,7 @@ import migration0020Bio from "../server/migrations/0020_user_bio.sql?raw";
 import migration0021Messaging from "../server/migrations/0021_direct_messages_blocks.sql?raw";
 import migration0022Oidc from "../server/migrations/0022_oidc_sso.sql?raw";
 import migration0023OidcSessions from "../server/migrations/0023_oidc_sessions.sql?raw";
+import migration0024OidcUsername from "../server/migrations/0024_oidc_username.sql?raw";
 
 // Must match vitest.config.ts's miniflare.bindings.DEV_TOKEN_SECRET.
 export const TEST_SECRET = "test-secret-do-not-use-in-prod";
@@ -67,7 +68,9 @@ export async function ensureMigrated(): Promise<void> {
   const oidcSessions = await env.DB.prepare(
     "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'oidc_sessions'"
   ).first();
-  if (marker && directoryProjection && hasCover && hasLastActive && hasBio && directMessages && oidcIdentities && oidcSessions) return;
+  const oidcIdentityColumns = oidcIdentities ? await env.DB.prepare("PRAGMA table_info(oidc_identities)").all<{ name: string }>() : null;
+  const hasOidcUsername = oidcIdentityColumns?.results.some((column) => column.name === "username") ?? false;
+  if (marker && directoryProjection && hasCover && hasLastActive && hasBio && directMessages && oidcIdentities && oidcSessions && hasOidcUsername) return;
   if (marker) {
     if (!directoryProjection) {
       for (const statement of splitStatements(migration0017)) await env.DB.prepare(statement).run();
@@ -78,9 +81,10 @@ export async function ensureMigrated(): Promise<void> {
     if (!directMessages) for (const statement of splitStatements(migration0021Messaging)) await env.DB.prepare(statement).run();
     if (!oidcIdentities) for (const statement of splitStatements(migration0022Oidc)) await env.DB.prepare(statement).run();
     if (!oidcSessions) for (const statement of splitStatements(migration0023OidcSessions)) await env.DB.prepare(statement).run();
+    if (!hasOidcUsername) for (const statement of splitStatements(migration0024OidcUsername)) await env.DB.prepare(statement).run();
     return;
   }
-  for (const sql of [migration0001, migration0002, migration0003, migration0004, migration0005, migration0006, migration0007, migration0008, migration0009, migration0010, migration0011, migration0012, migration0013, migration0014, migration0015, migration0016, migration0017, migration0018, migration0019, migration0020Bio, migration0021Messaging, migration0022Oidc, migration0023OidcSessions]) {
+  for (const sql of [migration0001, migration0002, migration0003, migration0004, migration0005, migration0006, migration0007, migration0008, migration0009, migration0010, migration0011, migration0012, migration0013, migration0014, migration0015, migration0016, migration0017, migration0018, migration0019, migration0020Bio, migration0021Messaging, migration0022Oidc, migration0023OidcSessions, migration0024OidcUsername]) {
     for (const statement of splitStatements(sql)) {
       await env.DB.prepare(statement).run();
     }

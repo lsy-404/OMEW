@@ -58,6 +58,7 @@
   ],
   "assets": {
     "directory": "../web/dist",
+    "binding": "ASSETS",
     "not_found_handling": "single-page-application",
     // every worker-served prefix must be listed here: anything missing is
     // swallowed by the SPA fallback above and comes back as index.html.

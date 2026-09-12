@@ -416,6 +416,7 @@ describe("GET /api/users/:actor", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       actor: `@profileuser1:${HOME_DOMAIN}`,
+      username: "profileuser1",
       display_name: "Profile User",
       avatar: null,
       cover: null,

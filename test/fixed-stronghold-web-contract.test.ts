@@ -7,6 +7,7 @@ import mobileNavBar from "../web/src/components/MobileNavBar.vue?raw";
 import nodeRail from "../web/src/components/NodeRail.vue?raw";
 import postModal from "../web/src/components/PostModal.vue?raw";
 import useEmotes from "../web/src/composables/useEmotes.ts?raw";
+import indexHtml from "../web/index.html?raw";
 
 describe("single stronghold web contract", () => {
   it("does not render the landing page in single mode", () => {
@@ -23,6 +24,8 @@ describe("single stronghold web contract", () => {
 
   it("uses the configured logo and gates optional interaction features", () => {
     expect(app).toContain("syncFavicon")
+    expect(app).toContain("const faviconSrc = computed(() => (artAssetsEnabled.value ? logoSrc.value : null))")
+    expect(app).toContain("link?.remove()")
     expect(nodeRail).toContain("art_assets_enabled !== false ? '/favicon.svg' : null")
     expect(mobileNavBar).toContain("art_assets_enabled !== false ? '/favicon.svg' : null")
     expect(chatPane).toContain("emotesEnabled")
@@ -31,5 +34,6 @@ describe("single stronghold web contract", () => {
     expect(useEmotes).toContain("builtin_emotes_enabled")
     expect(landingPage).toContain("v-if=\"artAssetsEnabled\"")
     expect(emptyState).toContain("v-if=\"image\"")
+    expect(indexHtml).not.toContain('rel="icon"')
   });
 });

@@ -38,7 +38,6 @@ const { activeView } = useShellView()
 const { config: instanceConfig, loading: instanceConfigLoading } = useInstanceConfig()
 const { nodes, loading: strongholdsLoading, selectNode } = useStronghold()
 const hasStrongholds = computed(() => nodes.value.length > 0)
-useDocumentTitle(isHome)
 
 // an unauthenticated visitor only hits the full-screen gate when the
 // instance doesn't allow guest browsing (or its config hasn't loaded
@@ -46,8 +45,10 @@ useDocumentTitle(isHome)
 // directly in its read-only guest state (useStronghold's isGuestMode).
 const showAuthGate = computed(() => !auth.isAuthenticated.value && !instanceConfig.value?.allow_guest_browsing)
 const singleMode = computed(() => instanceConfig.value?.instance_mode === 'single')
+const instanceName = computed(() => instanceConfig.value?.instance_name || 'OMEW')
 const artAssetsEnabled = computed(() => instanceConfig.value?.art_assets_enabled !== false)
 const logoSrc = computed(() => instanceConfig.value?.logo_url || (artAssetsEnabled.value ? '/favicon.svg' : null))
+const faviconSrc = computed(() => (artAssetsEnabled.value ? logoSrc.value : null))
 const showLanding = computed(() => isHome.value && !instanceConfigLoading.value && !singleMode.value)
 const showInstanceLoading = computed(() =>
   isHome.value && (instanceConfigLoading.value || (singleMode.value && strongholdsLoading.value && !hasStrongholds.value)),
@@ -55,12 +56,18 @@ const showInstanceLoading = computed(() =>
 const showInstanceConfigurationError = computed(() =>
   isHome.value && !instanceConfigLoading.value && singleMode.value && !instanceConfig.value?.root_stronghold,
 )
+useDocumentTitle(isHome, instanceName)
 
 function syncFavicon(logoUrl: string | null) {
   const link = document.querySelector<HTMLLinkElement>('link[rel="icon"]')
-  if (!link) return
-  if (logoUrl) link.href = logoUrl
-  else link.removeAttribute('href')
+  if (!logoUrl) {
+    link?.remove()
+    return
+  }
+  const target = link ?? document.head.appendChild(document.createElement('link'))
+  target.rel = 'icon'
+  target.type = 'image/svg+xml'
+  target.href = logoUrl
 }
 
 function installRoute(strongholdId?: string, strongholdSlug?: string) {
@@ -97,7 +104,7 @@ watch(auth.isAuthenticated, (authenticated) => {
 })
 
 watch(
-  logoSrc,
+  faviconSrc,
   (logoUrl) => syncFavicon(logoUrl),
   { immediate: true },
 )
@@ -121,6 +128,7 @@ onBeforeUnmount(() => {
   <div class="shell">
     <LandingPage
       v-if="showLanding"
+      :instance-name="instanceName"
       :authenticated="auth.isAuthenticated.value"
       :guest-browsing-allowed="instanceConfig?.allow_guest_browsing ?? false"
       :logo-url="logoSrc"
@@ -131,7 +139,7 @@ onBeforeUnmount(() => {
 
     <div v-else-if="showInstanceLoading" class="shell__loading" role="status" aria-live="polite" aria-busy="true">
       <span class="shell__loading-spinner" aria-hidden="true" />
-      <span>{{ singleMode ? '正在进入主据点…' : '正在加载 OMEW…' }}</span>
+      <span>{{ singleMode ? '正在进入主据点…' : `正在加载 ${instanceName}…` }}</span>
     </div>
 
     <div v-else-if="showInstanceConfigurationError" class="shell__loading" role="alert">

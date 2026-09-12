@@ -21,6 +21,7 @@ export type ServerRole = 'owner' | 'admin' | 'user'
 // stronghold_creation here vs. stronghold_creation_policy on admin - the
 // public route renames it on the way out, creators/peers stay admin-only).
 export interface InstanceConfig {
+  instance_name: string
   instance_mode: InstanceMode
   root_stronghold: RootStronghold | null
   allow_root: boolean
@@ -91,6 +92,7 @@ export interface AuthResponse {
 
 export interface UserProfile {
   actor: string
+  username: string
   display_name: string
   avatar: string | null
   cover: string | null

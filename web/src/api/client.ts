@@ -92,6 +92,7 @@ function booleansToDeny(patch: MemberPatch): number | undefined {
 
 interface WireMemberEntry {
   actor: string
+  username?: string
   display_name: string
   avatar: string | null
   role: StrongholdMember['role']
@@ -143,7 +144,7 @@ function toFeatureRestrictions(entry: { chat: WireFeatureRestrictionState; posts
 function toStrongholdMember(entry: WireMemberEntry): StrongholdMember {
   return {
     actor: entry.actor,
-    username: actorLocalpart(entry.actor),
+    username: entry.username ?? actorLocalpart(entry.actor),
     display_name: entry.display_name,
     avatar: entry.avatar,
     role: entry.role,
@@ -546,9 +547,9 @@ export const realApi = {
       { headers: authHeaders(token) },
     )
     const members = r.entries.map(toStrongholdMember)
-    const localparts = [...new Set(members.map((m) => m.username))]
+    const localparts = [...new Set(members.map((m) => actorLocalpart(m.actor)))]
     const groups = await fetchGroupsForLocalparts(token, localparts)
-    for (const member of members) member.groups = groups[member.username] ?? []
+    for (const member of members) member.groups = groups[actorLocalpart(member.actor)] ?? []
     return { members, next_cursor: r.next_cursor }
   },
 
@@ -659,13 +660,13 @@ export const realApi = {
   getGroupsForMembers: (token: string | null, localparts: string[]) => fetchGroupsForLocalparts(token, localparts),
 
   getUser: (token: string, actor: string) =>
-    request<{ actor: string; display_name: string; avatar: string | null; cover: string | null; created_at?: number; bio: string | null; is_guest: boolean; home_domain?: string }>(
+    request<{ actor: string; username: string; display_name: string; avatar: string | null; cover: string | null; created_at?: number; bio: string | null; is_guest: boolean; home_domain?: string }>(
       `/api/users/${encodeURIComponent(actor)}`,
       { headers: authHeaders(token) },
     ).then(
       (u): PublicUser => ({
         actor: u.actor,
-        username: actorLocalpart(u.actor),
+        username: u.username,
         display_name: u.display_name,
         avatar: u.avatar,
         cover: u.cover,

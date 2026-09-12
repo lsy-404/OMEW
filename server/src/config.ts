@@ -12,6 +12,7 @@
 import type { InstanceConfig, InstanceMode, RootRequirement, SsoMode, StrongholdCreationPolicy } from "./types";
 
 export interface InstanceBranding {
+  instance_name: string;
   logo_url: string | null;
   emotes_enabled: boolean;
   builtin_emotes_enabled: boolean;
@@ -133,9 +134,11 @@ export function getInstanceConfig(env: Env): InstanceConfig {
 }
 
 export function getInstanceBranding(env: Env): InstanceBranding {
+  const instanceName = env.INSTANCE_NAME?.trim() ?? "";
   const logo = env.INSTANCE_LOGO_URL?.trim() ?? "";
   const logoUrl = logo.startsWith("/") || /^https:\/\//i.test(logo) ? logo : null;
   return {
+    instance_name: instanceName.slice(0, 64) || "OMEW",
     logo_url: logoUrl,
     emotes_enabled: parseBool(env.ENABLE_EMOTES, true),
     builtin_emotes_enabled: parseBool(env.USE_BUILTIN_EMOTES, true),

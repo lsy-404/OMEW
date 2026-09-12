@@ -16,7 +16,7 @@ import {
 import { base64UrlDecode, base64UrlEncode, signToken, verifyToken } from "./auth";
 import type { SsoRuntimeConfig } from "./config";
 import { HOME_DOMAIN, instanceDomain, type ServerRole, type SessionTokenClaims } from "./types";
-import { isValidEmail } from "./users";
+import { isValidEmail, isValidUsername, normalizeUsername } from "./users";
 
 const AUTH_REQUEST_TTL_S = 10 * 60;
 const LOGIN_COMPLETION_TTL_S = 2 * 60;
@@ -71,6 +71,7 @@ interface OidcTransactionClaims extends JWTPayload, OidcTransactionData {}
 export interface OidcIdentity {
   issuer: string;
   subject: string;
+  username: string | null;
   display_name: string;
   email: string | null;
   email_verified: boolean;
@@ -89,6 +90,7 @@ export interface OidcTokenSet {
 
 export interface OidcUserRow {
   localpart: string;
+  username: string | null;
   display_name: string;
   avatar: string | null;
   cover: string | null;
@@ -673,6 +675,15 @@ function preferredDisplayName(idToken: JWTPayload, userInfo: Record<string, unkn
   return "SSO 用户";
 }
 
+function preferredUsername(idToken: JWTPayload, userInfo: Record<string, unknown>): string | null {
+  for (const value of [userInfo.preferred_username, idToken.preferred_username, userInfo.name, idToken.name]) {
+    if (typeof value !== "string") continue;
+    const username = normalizeUsername(value.trim());
+    if (isValidUsername(username)) return username;
+  }
+  return null;
+}
+
 export async function finishOidcAuthorization(
   request: Request,
   env: Env,
@@ -711,6 +722,7 @@ export async function finishOidcAuthorization(
     identity: {
       issuer: config.issuer,
       subject: idToken.sub as string,
+      username: preferredUsername(idToken, userInfo),
       display_name: preferredDisplayName(idToken, userInfo),
       email,
       email_verified: email !== null && emailVerified,
@@ -721,49 +733,50 @@ export async function finishOidcAuthorization(
 }
 
 const USER_SELECT =
-  "SELECT u.localpart, u.display_name, u.avatar, u.cover, u.bio, u.status, u.server_role, u.email, u.email_verified, u.totp_enabled " +
+  "SELECT u.localpart, i.username, u.display_name, u.avatar, u.cover, u.bio, u.status, u.server_role, u.email, u.email_verified, u.totp_enabled " +
   "FROM oidc_identities i JOIN users u ON u.localpart = i.localpart WHERE i.issuer = ? AND i.subject = ?";
 
 async function existingOidcUser(env: Env, identity: OidcIdentity): Promise<OidcUserRow | null> {
   return env.DB.prepare(USER_SELECT).bind(identity.issuer, identity.subject).first<OidcUserRow>();
 }
 
-function newSsoLocalpart(): string {
-  return `sso-${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`;
-}
-
 export async function mapOidcIdentity(env: Env, identity: OidcIdentity): Promise<OidcUserRow> {
   const existing = await existingOidcUser(env, identity);
   const timestamp = Date.now();
   if (existing) {
+    const username = identity.username ?? existing.username;
     const email = identity.email ?? existing.email;
     const emailVerified = identity.email === null ? existing.email_verified : identity.email_verified ? 1 : 0;
     await env.DB.batch([
       env.DB.prepare("UPDATE users SET display_name = ?, email = ?, email_verified = ? WHERE localpart = ?")
         .bind(identity.display_name, email, emailVerified, existing.localpart),
-      env.DB.prepare("UPDATE oidc_identities SET last_login_at = ? WHERE issuer = ? AND subject = ?")
-        .bind(timestamp, identity.issuer, identity.subject),
+      env.DB.prepare("UPDATE oidc_identities SET username = ?, last_login_at = ? WHERE issuer = ? AND subject = ?")
+        .bind(username, timestamp, identity.issuer, identity.subject),
     ]);
-    return { ...existing, display_name: identity.display_name, email, email_verified: emailVerified };
+    return { ...existing, username, display_name: identity.display_name, email, email_verified: emailVerified };
   }
 
-  for (let attempt = 0; attempt < 4; attempt++) {
-    const localpart = newSsoLocalpart();
-    try {
-      await env.DB.batch([
-        env.DB.prepare(
-          "INSERT INTO users (localpart, display_name, status, created_at, server_role, email, email_verified) VALUES (?, ?, 'active', ?, 'user', ?, ?)",
-        ).bind(localpart, identity.display_name, timestamp, identity.email, identity.email_verified ? 1 : 0),
-        env.DB.prepare(
-          "INSERT INTO oidc_identities (issuer, subject, localpart, created_at, last_login_at) VALUES (?, ?, ?, ?, ?)",
-        ).bind(identity.issuer, identity.subject, localpart, timestamp, timestamp),
-      ]);
-      const created = await existingOidcUser(env, identity);
-      if (created) return created;
-    } catch {
-      const raced = await existingOidcUser(env, identity);
-      if (raced) return raced;
-    }
+  if (!identity.username) throw new OidcError("SSO_USERNAME_INVALID", 400);
+  const conflict = await env.DB.prepare("SELECT localpart FROM users WHERE localpart = ?")
+    .bind(identity.username)
+    .first<{ localpart: string }>();
+  if (conflict) throw new OidcError("SSO_USERNAME_CONFLICT", 409);
+
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        "INSERT INTO users (localpart, display_name, status, created_at, server_role, email, email_verified) VALUES (?, ?, 'active', ?, 'user', ?, ?)",
+      ).bind(identity.username, identity.display_name, timestamp, identity.email, identity.email_verified ? 1 : 0),
+      env.DB.prepare(
+        "INSERT INTO oidc_identities (issuer, subject, localpart, username, created_at, last_login_at) VALUES (?, ?, ?, ?, ?, ?)",
+      ).bind(identity.issuer, identity.subject, identity.username, identity.username, timestamp, timestamp),
+    ]);
+    const created = await existingOidcUser(env, identity);
+    if (created) return created;
+  } catch {
+    const raced = await existingOidcUser(env, identity);
+    if (raced) return raced;
+    throw new OidcError("SSO_USERNAME_CONFLICT", 409);
   }
   throw new OidcError("SSO_IDENTITY_ERROR", 500);
 }
@@ -859,7 +872,7 @@ export async function refreshOidcSession(
     ? await verifyIdToken(idToken, "", config, metadata, fetcher, false)
     : { sub: row.bound_subject };
   if (typeof idClaims.sub !== "string" || idClaims.sub !== row.bound_subject) throw new OidcError("SSO_TOKEN_INVALID", 401);
-  const identity: OidcIdentity = { issuer: config.issuer, subject: idClaims.sub, display_name: preferredDisplayName(idClaims, {}), email: typeof idClaims.email === "string" && isValidEmail(idClaims.email) ? idClaims.email : null, email_verified: idClaims.email_verified === true };
+  const identity: OidcIdentity = { issuer: config.issuer, subject: idClaims.sub, username: preferredUsername(idClaims, {}), display_name: preferredDisplayName(idClaims, {}), email: typeof idClaims.email === "string" && isValidEmail(idClaims.email) ? idClaims.email : null, email_verified: idClaims.email_verified === true };
   const newRefresh = typeof payload.refresh_token === "string" ? payload.refresh_token : refreshToken;
   const accessTokenExpiresAt = typeof payload.expires_in === "number" ? nowS() + payload.expires_in : null;
   await env.DB.prepare("UPDATE oidc_sessions SET refresh_token_ciphertext = ?, id_token_ciphertext = ?, access_token_expires_at = ?, refresh_token_expires_at = ?, updated_at = ? WHERE session_jti = ? AND revoked_at IS NULL").bind(await tokenCiphertext(newRefresh, env.DEV_TOKEN_SECRET), idToken ? await tokenCiphertext(idToken, env.DEV_TOKEN_SECRET) : row.id_token_ciphertext, accessTokenExpiresAt, nowS() + 30 * 24 * 60 * 60, nowS(), session.jti).run();

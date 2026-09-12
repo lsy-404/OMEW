@@ -446,6 +446,55 @@ function webauthnOrigin(env: Env): string {
 
 const RES_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
+function requestOrigin(value: string | null): string | null {
+  if (!value) return null;
+  try {
+    return new URL(value).origin;
+  } catch {
+    return null;
+  }
+}
+
+function isAllowedEmbeddedDocument(request: Request, embedOrigin: string): boolean {
+  const refererOrigin = requestOrigin(request.headers.get("Referer"));
+  const destination = request.headers.get("Sec-Fetch-Dest")?.toLowerCase() ?? "";
+  if (destination === "iframe") return refererOrigin === embedOrigin;
+  if (destination === "document") {
+    return request.headers.get("Sec-Fetch-Site") === "same-origin" && refererOrigin === new URL(request.url).origin;
+  }
+  // Safari does not consistently send Fetch Metadata. The parent origin is
+  // still present on the initial cross-origin iframe request.
+  return !destination && refererOrigin === embedOrigin;
+}
+
+function isDynamicPath(path: string): boolean {
+  return path.startsWith("/api/") || path === "/inbox" || path.startsWith("/inbox/") || path === "/stronghold" || path.startsWith("/stronghold/") || path === "/media" || path.startsWith("/media/");
+}
+
+function embedOnlyRejection(request: Request, env: Env, url: URL): Response | null {
+  const embedOrigin = env.EMBED_ORIGIN?.trim();
+  if (!embedOrigin || request.method !== "GET") return null;
+  const path = url.pathname;
+  if (isDynamicPath(path)) return null;
+  const destination = request.headers.get("Sec-Fetch-Dest")?.toLowerCase() ?? "";
+  if (destination && destination !== "document" && destination !== "iframe") return null;
+  try {
+    const configuredOrigin = new URL(embedOrigin);
+    if (configuredOrigin.origin !== embedOrigin || !isAllowedEmbeddedDocument(request, configuredOrigin.origin)) {
+      return new Response("此论坛仅在星尘粉丝站内提供", {
+        status: 403,
+        headers: { "Cache-Control": "no-store", "Content-Type": "text/plain; charset=UTF-8" },
+      });
+    }
+  } catch {
+    return new Response("此论坛暂未正确配置嵌入来源", {
+      status: 503,
+      headers: { "Cache-Control": "no-store", "Content-Type": "text/plain; charset=UTF-8" },
+    });
+  }
+  return null;
+}
+
 function cors(): HeadersInit {
   return {
     "Access-Control-Allow-Origin": "*",
@@ -556,8 +605,8 @@ async function clearExpiredGlobalBan(env: Env, localpart: string): Promise<void>
 
 async function localUserByLocalpart(env: Env, localpart: string): Promise<OidcUserRow | null> {
   return env.DB.prepare(
-    "SELECT localpart, display_name, avatar, cover, bio, status, server_role, email, email_verified, totp_enabled " +
-      "FROM users WHERE localpart = ?",
+    "SELECT u.localpart, COALESCE((SELECT username FROM oidc_identities WHERE localpart = u.localpart LIMIT 1), u.localpart) AS username, u.display_name, u.avatar, u.cover, u.bio, u.status, u.server_role, u.email, u.email_verified, u.totp_enabled " +
+      "FROM users u WHERE u.localpart = ?",
   ).bind(localpart).first<OidcUserRow>();
 }
 
@@ -740,6 +789,13 @@ function match(pattern: string, path: string): Record<string, string> | null {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+
+    const embedRejection = embedOnlyRejection(request, env, url);
+    if (embedRejection) return embedRejection;
+
+    if ((request.method === "GET" || request.method === "HEAD") && !isDynamicPath(url.pathname)) {
+      return env.ASSETS.fetch(request);
+    }
 
     if (request.method === "OPTIONS") {
       return new Response(null, { headers: cors() });
@@ -3096,11 +3152,13 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     if (!target.startsWith("@") || !target.includes(":")) return apiError(400, "MALFORMED");
 
     if (domainOfActor(target) === instanceDomain(env)) {
-      const row = await env.DB.prepare("SELECT display_name, avatar, cover, bio, created_at FROM users WHERE localpart = ?")
+      const row = await env.DB.prepare(
+        "SELECT u.display_name, u.avatar, u.cover, u.bio, u.created_at, COALESCE((SELECT username FROM oidc_identities WHERE localpart = u.localpart LIMIT 1), u.localpart) AS username FROM users u WHERE u.localpart = ?",
+      )
         .bind(localpartOfActor(target))
-        .first<{ display_name: string; avatar: string | null; cover: string | null; bio: string | null; created_at: number }>();
+        .first<{ username: string; display_name: string; avatar: string | null; cover: string | null; bio: string | null; created_at: number }>();
       if (!row) return apiError(404, "NOT_FOUND");
-      return json({ actor: target, display_name: row.display_name, avatar: row.avatar, cover: row.cover, bio: row.bio, created_at: row.created_at, is_guest: false });
+      return json({ actor: target, username: row.username, display_name: row.display_name, avatar: row.avatar, cover: row.cover, bio: row.bio, created_at: row.created_at, is_guest: false });
     }
 
     const row = await env.DB.prepare(
@@ -3949,6 +4007,7 @@ function roomErrorStatus(code: string): number {
 }
 
 interface ActorProfile {
+  username: string;
   display_name: string;
   avatar: string | null;
   last_active_at: number | null;
@@ -3970,15 +4029,15 @@ async function actorProfiles(env: Env, actors: string[]): Promise<Map<string, Ac
     const localparts = localActors.map(localpartOfActor);
     const placeholders = localparts.map(() => "?").join(",");
     const { results } = await env.DB.prepare(
-      `SELECT localpart, display_name, avatar, last_active_at FROM users WHERE localpart IN (${placeholders})`
-    )
+      `SELECT u.localpart, COALESCE((SELECT username FROM oidc_identities WHERE localpart = u.localpart LIMIT 1), u.localpart) AS username, u.display_name, u.avatar, u.last_active_at FROM users u WHERE u.localpart IN (${placeholders})`
+      )
       .bind(...localparts)
-    .all<{ localpart: string; display_name: string; avatar: string | null; last_active_at: number | null }>();
+    .all<{ localpart: string; username: string; display_name: string; avatar: string | null; last_active_at: number | null }>();
     const byLocalpart = new Map(results.map((r) => [r.localpart, r]));
     for (const actor of localActors) {
       const localpart = localpartOfActor(actor);
       const row = byLocalpart.get(localpart);
-      result.set(actor, { display_name: row?.display_name ?? localpart, avatar: row?.avatar ?? null, last_active_at: row?.last_active_at ?? null, is_guest: false });
+      result.set(actor, { username: row?.username ?? localpart, display_name: row?.display_name ?? localpart, avatar: row?.avatar ?? null, last_active_at: row?.last_active_at ?? null, is_guest: false });
     }
   }
 
@@ -3992,7 +4051,7 @@ async function actorProfiles(env: Env, actors: string[]): Promise<Map<string, Ac
     const byActor = new Map(results.map((r) => [r.actor, r]));
     for (const actor of guestActors) {
       const row = byActor.get(actor);
-      result.set(actor, { display_name: row?.display_name ?? actor, avatar: row?.avatar ?? null, last_active_at: null, is_guest: true, home_domain: row?.registered_origin });
+      result.set(actor, { username: localpartOfActor(actor), display_name: row?.display_name ?? actor, avatar: row?.avatar ?? null, last_active_at: null, is_guest: true, home_domain: row?.registered_origin });
     }
   }
 
@@ -4005,6 +4064,7 @@ async function actorProfiles(env: Env, actors: string[]): Promise<Map<string, Ac
 function toMemberEntry(member: MemberRow, profile: ActorProfile | undefined) {
   return {
     actor: member.actor,
+    username: profile?.username ?? localpartOfActor(member.actor),
     display_name: profile?.display_name ?? member.actor,
     avatar: profile?.avatar ?? null,
     last_active_at: profile?.last_active_at ?? null,
