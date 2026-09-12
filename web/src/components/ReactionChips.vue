@@ -1,12 +1,16 @@
 <script setup lang="ts">
 import type { ItemReactions } from '../api/types'
 import { BUILTIN_REACTION_SET } from '../assets/mew-emotes'
+import { computed } from 'vue'
+import { useInstanceConfig } from '../composables/useInstanceConfig'
 
 // canToggle: gated by the caller to auth state + a resolved seq (guests and
 // still-optimistic items render read-only chips, per m0-protocol §3.2a -
 // reacting requires a live room session).
 defineProps<{ reactions?: ItemReactions; canToggle: boolean }>()
 const emit = defineEmits<{ toggle: [name: string] }>()
+const { config: instanceConfig } = useInstanceConfig()
+const artAssetsEnabled = computed(() => instanceConfig.value?.art_assets_enabled !== false)
 </script>
 
 <template>
@@ -21,7 +25,7 @@ const emit = defineEmits<{ toggle: [name: string] }>()
       :title="entry.name"
       @click="emit('toggle', entry.name)"
     >
-      <img v-if="BUILTIN_REACTION_SET[entry.name]" class="reaction-chip__image" :src="BUILTIN_REACTION_SET[entry.name]" :alt="entry.name" />
+      <img v-if="artAssetsEnabled && BUILTIN_REACTION_SET[entry.name]" class="reaction-chip__image" :src="BUILTIN_REACTION_SET[entry.name]" :alt="entry.name" />
       <span v-else class="reaction-chip__fallback">{{ entry.name }}</span>
       <span class="reaction-chip__count">{{ entry.count }}</span>
     </button>

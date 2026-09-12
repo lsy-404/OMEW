@@ -10,6 +10,7 @@ const loading = ref(false)
 let loaded = false
 const { config: instanceConfig } = useInstanceConfig()
 const enabled = computed(() => instanceConfig.value?.emotes_enabled !== false)
+const artAssetsEnabled = computed(() => instanceConfig.value?.art_assets_enabled !== false)
 
 async function loadEmotes() {
   const auth = useAuth()
@@ -28,7 +29,10 @@ async function loadEmotes() {
 // built-in packs always present and listed last, so they win on a same-name
 // collision against the emote lookup (buildEmoteLookup keeps the last entry
 // written for a given "pack:name" key).
-const packs = computed<EmotePack[]>(() => [...instancePacks.value, BUILTIN_REACTION_PACK, BUILTIN_EMOTE_PACK])
+const packs = computed<EmotePack[]>(() => [
+  ...instancePacks.value,
+  ...(artAssetsEnabled.value ? [BUILTIN_REACTION_PACK, BUILTIN_EMOTE_PACK] : []),
+])
 
 export function useEmotes() {
   const auth = useAuth()

@@ -29,7 +29,7 @@ describe('OMEW landing page contract', () => {
 
   it('defines the landing-page visual and interaction vocabulary', () => {
     expect(landing).toMatch(/LandingWorld/)
-    expect(landing).toMatch(/(?:favicon\.svg|OMEW Logo)/)
+    expect(landing).toMatch(/(?:logoUrl|OMEW Logo)/)
     expect(landing).toMatch(/WinButton/)
     expect(landing).toMatch(/@Click=/)
     expect(landing).toMatch(/(?:登录|注册)/)

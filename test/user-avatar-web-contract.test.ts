@@ -18,7 +18,7 @@ describe("personal avatar web contract", () => {
   });
 
   it("passes projected avatar URLs into the shared avatar renderer", () => {
-    expect(avatarBadgeSource).toContain("props.avatarUrl || defaultAvatarUrl(props.seed)");
+    expect(avatarBadgeSource).toContain("props.avatarUrl || (instanceConfig.value?.art_assets_enabled !== false ? defaultAvatarUrl(props.seed) : null)");
     expect(chatSource).toContain("avatarUrl: avatarUrl(item.actor)");
     expect(messageSource).toContain(":avatar-url=\"message.avatarUrl ?? undefined\"");
   });

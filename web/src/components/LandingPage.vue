@@ -6,7 +6,12 @@ import AppIcon from './icons/AppIcon.vue'
 import LandingUpdates from './LandingUpdates.vue'
 import LandingWorld from './LandingWorld.vue'
 
-const props = defineProps<{ authenticated: boolean; guestBrowsingAllowed: boolean; logoUrl: string | null }>()
+const props = defineProps<{
+  authenticated: boolean
+  guestBrowsingAllowed: boolean
+  logoUrl: string | null
+  artAssetsEnabled: boolean
+}>()
 
 const emit = defineEmits<{
   authenticate: []
@@ -49,13 +54,13 @@ watch(
 
 <template>
   <main class="landing-page">
-    <LandingWorld class="landing-page__world" />
+    <LandingWorld v-if="artAssetsEnabled" class="landing-page__world" />
     <div class="landing-page__shade" aria-hidden="true" />
 
     <div class="landing-page__hero-screen">
       <header class="landing-page__header">
         <a class="landing-page__brand" href="/" aria-label="OMEW 首页">
-          <img :src="logoUrl || '/favicon.svg'" alt="" aria-hidden="true" />
+          <img v-if="logoUrl" :src="logoUrl" alt="" aria-hidden="true" />
           <span>OMEW</span>
         </a>
       </header>

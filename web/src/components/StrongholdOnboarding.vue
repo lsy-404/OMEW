@@ -1,17 +1,20 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { EMPTY_STATE } from '../assets/mew'
+import { useInstanceConfig } from '../composables/useInstanceConfig'
 import { WinButton } from '../vendor/winui'
 import CreateStrongholdCard from './CreateStrongholdCard.vue'
 import DirectoryModal from './DirectoryModal.vue'
 
 const showDirectory = ref(false)
+const { config: instanceConfig } = useInstanceConfig()
+const artAssetsEnabled = computed(() => instanceConfig.value?.art_assets_enabled !== false)
 </script>
 
 <template>
   <div class="onboarding">
     <div class="onboarding-card">
-      <img class="onboarding-card__image" :src="EMPTY_STATE.onboarding" alt="" />
+      <img v-if="artAssetsEnabled" class="onboarding-card__image" :src="EMPTY_STATE.onboarding" alt="" />
       <h1 class="onboarding-card__title">选择你的第一个据点</h1>
       <p class="onboarding-card__hint">加入现有的公开据点，立刻开始聊天和发帖。</p>
       <WinButton Style="AccentButtonStyle" class="onboarding-card__join" @click="showDirectory = true">

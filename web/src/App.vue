@@ -46,6 +46,8 @@ useDocumentTitle(isHome)
 // directly in its read-only guest state (useStronghold's isGuestMode).
 const showAuthGate = computed(() => !auth.isAuthenticated.value && !instanceConfig.value?.allow_guest_browsing)
 const fixedStronghold = computed(() => instanceConfig.value?.fixed_stronghold ?? null)
+const artAssetsEnabled = computed(() => instanceConfig.value?.art_assets_enabled !== false)
+const logoSrc = computed(() => instanceConfig.value?.logo_url || (artAssetsEnabled.value ? '/favicon.svg' : null))
 const showLanding = computed(() => isHome.value && !instanceConfigLoading.value && !fixedStronghold.value)
 const showFixedLoading = computed(() => isHome.value && (instanceConfigLoading.value || Boolean(fixedStronghold.value)))
 const STAR_DUST_ORIGIN = 'https://stardustinfinity.top'
@@ -67,9 +69,11 @@ function announceEmbeddedReady() {
   if (window.parent !== window) window.parent.postMessage({ type: 'omew-ready' }, STAR_DUST_ORIGIN)
 }
 
-function syncFavicon(logoUrl: string | null | undefined) {
+function syncFavicon(logoUrl: string | null) {
   const link = document.querySelector<HTMLLinkElement>('link[rel="icon"]')
-  if (link) link.href = logoUrl || '/favicon.svg'
+  if (!link) return
+  if (logoUrl) link.href = logoUrl
+  else link.removeAttribute('href')
 }
 
 function installRoute(strongholdId?: string, strongholdSlug?: string) {
@@ -118,7 +122,7 @@ watch(
 )
 
 watch(
-  () => instanceConfig.value?.logo_url,
+  logoSrc,
   (logoUrl) => syncFavicon(logoUrl),
   { immediate: true },
 )
@@ -140,7 +144,8 @@ onBeforeUnmount(() => {
       v-if="showLanding"
       :authenticated="auth.isAuthenticated.value"
       :guest-browsing-allowed="instanceConfig?.allow_guest_browsing ?? false"
-      :logo-url="instanceConfig?.logo_url ?? null"
+      :logo-url="logoSrc"
+      :art-assets-enabled="artAssetsEnabled"
       @authenticate="openAuthModal"
       @browse="installRoute"
     />

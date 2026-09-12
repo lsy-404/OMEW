@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { DEFAULT_NODE_PAGE_BG, EMPTY_STATE } from '../assets/mew'
 import { useAuth } from '../composables/useAuth'
 import { useAuthModal } from '../composables/useAuthModal'
+import { useInstanceConfig } from '../composables/useInstanceConfig'
 import { useSection } from '../composables/useSection'
 import { useSectionRoom } from '../composables/useSectionRoom'
 import { useStronghold } from '../composables/useStronghold'
@@ -19,14 +20,16 @@ const { posts, postsLoading, hasMorePosts, loadMorePosts, postRoom, toggleReacti
 const { sectionRooms, selectedSection, selectSection } = useSection()
 const { currentNode } = useStronghold()
 const { config } = useStrongholdConfig()
+const { config: instanceConfig } = useInstanceConfig()
 
 const showCompose = ref(false)
 const canParticipate = computed(() => auth.isAuthenticated.value && !isReadOnly.value)
+const artAssetsEnabled = computed(() => instanceConfig.value?.art_assets_enabled !== false)
 
 const strongholdName = computed(() => config.value?.name ?? currentNode.value?.name ?? '')
 const strongholdDescription = computed(() => config.value?.description ?? '')
 const strongholdAvatar = computed(() => config.value?.avatar ?? currentNode.value?.avatar ?? null)
-const strongholdCover = computed(() => config.value?.cover || currentNode.value?.cover || DEFAULT_NODE_PAGE_BG)
+const strongholdCover = computed(() => config.value?.cover || currentNode.value?.cover || (artAssetsEnabled.value ? DEFAULT_NODE_PAGE_BG : null))
 
 function openCompose() {
   showCompose.value = true
@@ -123,7 +126,7 @@ function onSectionKeydown(event: KeyboardEvent, index: number) {
         :post="post"
         @toggle-reaction="toggleReaction(post.post_seq, $event)"
       />
-      <EmptyState v-if="!posts.length && !postsLoading" :image="EMPTY_STATE.posts" text="暂无帖子" />
+      <EmptyState v-if="!posts.length && !postsLoading" :image="artAssetsEnabled ? EMPTY_STATE.posts : null" text="暂无帖子" />
       <div v-if="hasMorePosts" class="left-column__more">
         <WinButton Style="SubtleButtonStyle" :IsEnabled="!postsLoading" @click="loadMorePosts">
           {{ postsLoading ? '加载中…' : '加载更多' }}

@@ -15,6 +15,7 @@ export interface InstanceBranding {
   logo_url: string | null;
   emotes_enabled: boolean;
   reactions_enabled: boolean;
+  art_assets_enabled: boolean;
 }
 
 function parseBool(value: string | undefined, fallback: boolean): boolean {
@@ -75,5 +76,6 @@ export function getInstanceBranding(env: Env): InstanceBranding {
     logo_url: logoUrl,
     emotes_enabled: parseBool(env.ENABLE_EMOTES, true),
     reactions_enabled: parseBool(env.ENABLE_REACTIONS, true),
+    art_assets_enabled: parseBool(env.USE_ART_ASSETS, true),
   };
 }

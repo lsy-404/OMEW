@@ -14,6 +14,7 @@ describe("fixed stronghold deployment mode", () => {
   beforeAll(async () => {
     await ensureMigrated();
     env.FIXED_STRONGHOLD = "medium5";
+    env.USE_ART_ASSETS = "0";
   });
 
   afterAll(async () => {
@@ -29,6 +30,7 @@ describe("fixed stronghold deployment mode", () => {
     ]);
     await stronghold.purgeForStrongholdDeletion();
     env.FIXED_STRONGHOLD = undefined;
+    env.USE_ART_ASSETS = undefined;
   });
 
   it("initializes and exposes only medium5", async () => {
@@ -39,6 +41,7 @@ describe("fixed stronghold deployment mode", () => {
       logo_url: null,
       emotes_enabled: true,
       reactions_enabled: true,
+      art_assets_enabled: false,
     });
 
     const directoryResponse = await apiRequest("/api/directory");

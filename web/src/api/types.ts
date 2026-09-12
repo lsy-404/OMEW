@@ -26,6 +26,7 @@ export interface InstanceConfig {
   logo_url: string | null
   emotes_enabled: boolean
   reactions_enabled: boolean
+  art_assets_enabled: boolean
 }
 
 // /api/admin/instance/config - mirrors the server's internal InstanceConfig

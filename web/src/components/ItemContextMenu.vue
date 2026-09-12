@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref, watch } from 'vue'
 import { BUILTIN_REACTION_SET } from '../assets/mew-emotes'
+import { computed } from 'vue'
+import { useInstanceConfig } from '../composables/useInstanceConfig'
 import { WinMenuFlyout } from '../vendor/winui'
 
 // Right-click/long-press menu shared by chat messages, post bodies and post
@@ -15,6 +17,8 @@ const open = ref(false)
 const anchorRect = ref<{ top: number; left: number; right: number; bottom: number; width: number; height: number } | null>(null)
 
 const reactionNames = Object.keys(BUILTIN_REACTION_SET)
+const { config: instanceConfig } = useInstanceConfig()
+const artAssetsEnabled = computed(() => instanceConfig.value?.art_assets_enabled !== false)
 
 function close() {
   open.value = false
@@ -119,7 +123,8 @@ defineExpose({ openAt })
           :title="name"
           @click="pick(name)"
         >
-          <img :src="BUILTIN_REACTION_SET[name]" :alt="name" />
+          <img v-if="artAssetsEnabled && BUILTIN_REACTION_SET[name]" :src="BUILTIN_REACTION_SET[name]" :alt="name" />
+          <span v-else class="item-context-menu__reaction-fallback">{{ name }}</span>
         </button>
       </div>
       <div v-if="canReact && (canEdit || canRetract)" class="item-context-menu__separator" role="separator"></div>
@@ -178,6 +183,15 @@ defineExpose({ openAt })
   width: 100%;
   height: 100%;
   object-fit: contain;
+}
+
+.item-context-menu__reaction-fallback {
+  display: block;
+  overflow: hidden;
+  font-size: 0.62rem;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 @media (max-width: 360px) {

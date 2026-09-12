@@ -4,6 +4,7 @@ import { api } from '../api'
 import type { BanEntry, FeatureRestrictions, MemberPatch, MemberTab, RestrictedFeature, StrongholdConfigPatch, StrongholdMember } from '../api/types'
 import { EMPTY_STATE } from '../assets/mew'
 import { useAuth } from '../composables/useAuth'
+import { useInstanceConfig } from '../composables/useInstanceConfig'
 import { useStorageUsage } from '../composables/useStorageUsage'
 import { useStronghold } from '../composables/useStronghold'
 import { useStrongholdConfig } from '../composables/useStrongholdConfig'
@@ -26,6 +27,8 @@ const props = withDefaults(defineProps<{ open: boolean; initialTab?: 'members' |
 const emit = defineEmits<{ close: [] }>()
 
 const auth = useAuth()
+const { config: instanceConfig } = useInstanceConfig()
+const artAssetsEnabled = computed(() => instanceConfig.value?.art_assets_enabled !== false)
 const { currentNode, selectedNodeId, loadStrongholds } = useStronghold()
 const { reload: reloadStrongholdConfig } = useStrongholdConfig()
 const { myRole } = useStrongholdMembers()
@@ -391,7 +394,7 @@ watch(
               <WinInfoBar v-else-if="membersError" :IsOpen="true" :IsClosable="false" :IsIconVisible="false" Severity="Error">
                 {{ membersError }}
               </WinInfoBar>
-              <EmptyState v-else-if="!members.length" :image="EMPTY_STATE.members" :text="panelTab === 'banned' ? '黑名单为空' : '暂无成员'" />
+              <EmptyState v-else-if="!members.length" :image="artAssetsEnabled ? EMPTY_STATE.members : null" :text="panelTab === 'banned' ? '黑名单为空' : '暂无成员'" />
 
               <ul v-else class="member-list">
                 <li v-for="member in members" :key="member.actor" class="member-row">

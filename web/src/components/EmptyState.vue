@@ -1,10 +1,10 @@
 <script setup lang="ts">
-defineProps<{ image: string; text: string }>()
+defineProps<{ image?: string | null; text: string }>()
 </script>
 
 <template>
   <div class="empty-state">
-    <img class="empty-state__image" :src="image" alt="" />
+    <img v-if="image" class="empty-state__image" :src="image" alt="" />
     <p class="empty-state__text">{{ text }}</p>
   </div>
 </template>

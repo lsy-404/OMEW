@@ -57,6 +57,7 @@ const editingImage = ref<File | null>(null)
 const canParticipate = computed(() => auth.isAuthenticated.value && !isReadOnly.value)
 const emotesEnabled = computed(() => instanceConfig.value?.emotes_enabled !== false)
 const reactionsEnabled = computed(() => instanceConfig.value?.reactions_enabled !== false)
+const artAssetsEnabled = computed(() => instanceConfig.value?.art_assets_enabled !== false)
 const CHAT_INPUT_MAX_HEIGHT = 140
 
 // one shared context-menu instance for every message row (rather than one per
@@ -281,7 +282,7 @@ watch(() => selectedChannel.value?.id, pin, { flush: 'post' })
           {{ historyLoading ? '加载中…' : '加载更早的消息' }}
         </WinButton>
       </div>
-      <EmptyState v-if="!groupedMessages.length && !historyLoading" :image="EMPTY_STATE.chat" text="还没有消息，说点什么吧" />
+      <EmptyState v-if="!groupedMessages.length && !historyLoading" :image="artAssetsEnabled ? EMPTY_STATE.chat : null" text="还没有消息，说点什么吧" />
       <MessageBubble
         v-for="entry in groupedMessages"
         :key="entry.message.key"

@@ -12,6 +12,7 @@ const auth = useAuth()
 const { nodes, selectedNodeId, selectNode } = useStronghold()
 const { config: instanceConfig } = useInstanceConfig()
 const fixedStronghold = computed(() => instanceConfig.value?.fixed_stronghold ?? null)
+const logoSrc = computed(() => instanceConfig.value?.logo_url || (instanceConfig.value?.art_assets_enabled !== false ? '/favicon.svg' : null))
 const showCreate = ref(false)
 const showDirectory = ref(false)
 
@@ -35,7 +36,8 @@ function handleLogoClick(event: MouseEvent) {
       :aria-label="fixedStronghold ? `返回 ${fixedStronghold.name}` : '返回 OMEW 首页'"
       @click="handleLogoClick"
     >
-      <img :src="instanceConfig?.logo_url || '/favicon.svg'" alt="" aria-hidden="true" />
+      <img v-if="logoSrc" :src="logoSrc" alt="" aria-hidden="true" />
+      <span v-else aria-hidden="true">O</span>
     </a>
     <ul class="node-rail__list">
       <li v-for="node in nodes" :key="node.id">

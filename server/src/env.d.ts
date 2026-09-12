@@ -11,6 +11,7 @@ interface Env {
   INSTANCE_LOGO_URL?: string;
   ENABLE_EMOTES?: string;
   ENABLE_REACTIONS?: string;
+  USE_ART_ASSETS?: string;
   CF_API_TOKEN?: string;
   CF_ACCOUNT_ID?: string;
 }
@@ -23,6 +24,7 @@ declare namespace Cloudflare {
     INSTANCE_LOGO_URL?: string;
     ENABLE_EMOTES?: string;
     ENABLE_REACTIONS?: string;
+    USE_ART_ASSETS?: string;
     CF_API_TOKEN?: string;
     CF_ACCOUNT_ID?: string;
   }

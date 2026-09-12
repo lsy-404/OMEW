@@ -11,6 +11,7 @@ describe("getInstanceBranding", () => {
       logo_url: null,
       emotes_enabled: true,
       reactions_enabled: true,
+      art_assets_enabled: true,
     });
   });
 
@@ -21,12 +22,14 @@ describe("getInstanceBranding", () => {
           INSTANCE_LOGO_URL: "https://stardustinfinity.top/favicon.svg",
           ENABLE_EMOTES: "0",
           ENABLE_REACTIONS: "false",
+          USE_ART_ASSETS: "0",
         }),
       ),
     ).toEqual({
       logo_url: "https://stardustinfinity.top/favicon.svg",
       emotes_enabled: false,
       reactions_enabled: false,
+      art_assets_enabled: false,
     });
   });
 
