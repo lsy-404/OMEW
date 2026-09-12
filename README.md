@@ -8,7 +8,7 @@ Open-source, self-hostable community platform built around strongholds, realtime
 
 首个正式版本已经完成单实例社区闭环：公开首页与据点目录、账号与通行密钥、实时聊天、Markdown 帖子、图片与表情、成员资料、私信、权限组、封禁和临时功能限制。
 
-推荐通过 [Overture 在线部署器](https://overture.demo-w10v.workers.dev/?src=wuyilingwei%2FOMEW) 安装。链接已经预选 `wuyilingwei/OMEW`，无需本地工具链；安装器会列出将创建的 Worker、D1、R2、Durable Objects 与所需权限，再把 OMEW 部署到你自己的 Cloudflare 账户。
+推荐通过 [Overture 在线部署器](https://overture.lsy-demo.workers.dev/?src=lsy-404%2FOMEW) 安装。链接已经预选 `lsy-404/OMEW`，无需本地工具链；安装器会列出将创建的 Worker、D1、R2、Durable Objects 与所需权限，再把 OMEW 部署到你自己的 Cloudflare 账户。
 
 为了让服务器领主可以在 OMEW 内更新实例政策，Overture 会要求一个由部署者创建的长期 Cloudflare Account API Token，并作为 Worker Secret 保存。该令牌需要账户级 Workers Scripts 写权限，也能影响同账户中的其他 Worker，因此推荐为 OMEW 使用专用 Cloudflare 账户。
 
