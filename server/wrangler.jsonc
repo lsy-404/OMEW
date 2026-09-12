@@ -24,6 +24,12 @@
   "vars": {
     "INSTANCE_DOMAIN": "omew.wuyilingwei.com",
     "CF_WORKER_NAME": "openmew-server",
+    "INSTANCE_MODE": "multi",
+    "ROOT_STRONGHOLD": "",
+    "SSO_MODE": "disabled",
+    "SSO_ISSUER": "",
+    "SSO_CLIENT_ID": "",
+    "SSO_PROVIDER_NAME": "",
     // m0-protocol §7.9: instance policy as deployment env config - see
     // server/src/config.ts for parsing and .dev.vars.example for local overrides.
     "ALLOW_ROOT": "1",

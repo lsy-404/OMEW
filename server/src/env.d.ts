@@ -6,8 +6,13 @@
 
 interface Env {
   DEV_TOKEN_SECRET: string;
-  STAR_DUST_SSO_SECRET?: string;
-  FIXED_STRONGHOLD?: string;
+  SSO_MODE?: string;
+  SSO_ISSUER?: string;
+  SSO_CLIENT_ID?: string;
+  SSO_CLIENT_SECRET?: string;
+  SSO_PROVIDER_NAME?: string;
+  INSTANCE_MODE?: string;
+  ROOT_STRONGHOLD?: string;
   INSTANCE_LOGO_URL?: string;
   ENABLE_EMOTES?: string;
   USE_BUILTIN_EMOTES?: string;
@@ -20,8 +25,13 @@ interface Env {
 declare namespace Cloudflare {
   interface Env {
     DEV_TOKEN_SECRET: string;
-    STAR_DUST_SSO_SECRET?: string;
-    FIXED_STRONGHOLD?: string;
+    SSO_MODE?: string;
+    SSO_ISSUER?: string;
+    SSO_CLIENT_ID?: string;
+    SSO_CLIENT_SECRET?: string;
+    SSO_PROVIDER_NAME?: string;
+    INSTANCE_MODE?: string;
+    ROOT_STRONGHOLD?: string;
     INSTANCE_LOGO_URL?: string;
     ENABLE_EMOTES?: string;
     USE_BUILTIN_EMOTES?: string;

@@ -10,36 +10,47 @@ function apiRequest(path: string, init: RequestInit = {}): Promise<Response> {
   return worker.fetch(new Request(`http://local${path}`, { ...init, headers }), env);
 }
 
-describe("fixed stronghold deployment mode", () => {
+describe("single stronghold instance mode", () => {
   beforeAll(async () => {
     await ensureMigrated();
-    env.FIXED_STRONGHOLD = "medium5";
+    env.INSTANCE_MODE = "single";
+    env.ROOT_STRONGHOLD = "medium5";
     env.USE_ART_ASSETS = "0";
     env.USE_BUILTIN_EMOTES = "0";
+    await env.STRONGHOLD_DO.getByName("root-id").ensureConfigWithDefaults(
+      "root-id",
+      "Configured root",
+      "public",
+      "@system:local",
+      "",
+      "medium5",
+    );
   });
 
   afterAll(async () => {
-    const stronghold = env.STRONGHOLD_DO.getByName("medium5");
+    const stronghold = env.STRONGHOLD_DO.getByName("root-id");
     const rooms = await stronghold.listRoomsForDeletion();
     await Promise.all(
-      rooms.map((room) => env.ROOM_DO.getByName(`medium5/${typeToKind(room.type)}/${room.res_id}`).purgeForStrongholdDeletion()),
+      rooms.map((room) => env.ROOM_DO.getByName(`root-id/${typeToKind(room.type)}/${room.res_id}`).purgeForStrongholdDeletion()),
     );
     await env.DB.batch([
-      env.DB.prepare("DELETE FROM stronghold_member_index WHERE stronghold_id = ?").bind("medium5"),
-      env.DB.prepare("DELETE FROM stronghold_slug_index WHERE stronghold_id = ?").bind("medium5"),
-      env.DB.prepare("DELETE FROM stronghold_directory_index WHERE stronghold_id = ?").bind("medium5"),
+      env.DB.prepare("DELETE FROM stronghold_member_index WHERE stronghold_id = ?").bind("root-id"),
+      env.DB.prepare("DELETE FROM stronghold_slug_index WHERE stronghold_id = ?").bind("root-id"),
+      env.DB.prepare("DELETE FROM stronghold_directory_index WHERE stronghold_id = ?").bind("root-id"),
     ]);
     await stronghold.purgeForStrongholdDeletion();
-    env.FIXED_STRONGHOLD = undefined;
+    env.INSTANCE_MODE = "multi";
+    env.ROOT_STRONGHOLD = "";
     env.USE_ART_ASSETS = undefined;
     env.USE_BUILTIN_EMOTES = undefined;
   });
 
-  it("initializes and exposes only medium5", async () => {
+  it("initializes and exposes the configured root stronghold", async () => {
     const configResponse = await apiRequest("/api/instance/config");
     expect(configResponse.status).toBe(200);
     expect(await configResponse.json()).toMatchObject({
-      fixed_stronghold: { id: "medium5", name: "medium5", slug: "medium5" },
+      instance_mode: "single",
+      root_stronghold: { id: "root-id", name: "Configured root", slug: "medium5" },
       logo_url: null,
       emotes_enabled: true,
       builtin_emotes_enabled: false,
@@ -50,35 +61,46 @@ describe("fixed stronghold deployment mode", () => {
     const directoryResponse = await apiRequest("/api/directory");
     expect(directoryResponse.status).toBe(200);
     expect(await directoryResponse.json()).toMatchObject({
-      strongholds: [{ id: "medium5", name: "medium5", slug: "medium5" }],
+      strongholds: [{ id: "root-id", name: "Configured root", slug: "medium5" }],
     });
 
     const resolveResponse = await apiRequest("/api/resolve/a/medium5");
     expect(resolveResponse.status).toBe(200);
-    expect(await resolveResponse.json()).toEqual({ stronghold_id: "medium5" });
+    expect(await resolveResponse.json()).toEqual({ stronghold_id: "root-id" });
 
     const otherSlugResponse = await apiRequest("/api/resolve/a/other-place");
     expect(otherSlugResponse.status).toBe(404);
 
-    const strongholdResponse = await apiRequest("/api/stronghold/medium5/config");
+    const strongholdResponse = await apiRequest("/api/stronghold/root-id/config");
     expect(strongholdResponse.status).toBe(200);
-    expect((await strongholdResponse.json()).name).toBe("medium5");
+    expect((await strongholdResponse.json()).name).toBe("Configured root");
   });
 
-  it("rejects creation, alternate strongholds, and destructive fixed-mode operations", async () => {
+  it("rejects creating, deleting, or addressing another stronghold", async () => {
     const createResponse = await apiRequest("/api/strongholds", {
       method: "POST",
       body: JSON.stringify({ name: "other" }),
     });
     expect(createResponse.status).toBe(403);
-    expect(await createResponse.json()).toEqual({ error: "STRONGHOLD_FIXED" });
+    expect(await createResponse.json()).toEqual({ error: "INSTANCE_SINGLE_STRONGHOLD" });
 
-    const otherStrongholdResponse = await apiRequest("/api/stronghold/other");
+    const otherStrongholdResponse = await apiRequest("/api/stronghold/other/config");
     expect(otherStrongholdResponse.status).toBe(404);
 
-    const deleteResponse = await apiRequest("/api/stronghold/medium5", { method: "DELETE" });
+    const deleteResponse = await apiRequest("/api/stronghold/root-id", { method: "DELETE" });
     expect(deleteResponse.status).toBe(403);
-    expect(await deleteResponse.json()).toEqual({ error: "STRONGHOLD_FIXED" });
+    expect(await deleteResponse.json()).toEqual({ error: "INSTANCE_SINGLE_STRONGHOLD" });
+  });
+
+  it("keeps the deployment configuration repairable when the root is missing", async () => {
+    env.ROOT_STRONGHOLD = "";
+    const configResponse = await apiRequest("/api/instance/config");
+    expect(configResponse.status).toBe(200);
+    expect(await configResponse.json()).toMatchObject({ instance_mode: "single", root_stronghold: null });
+    const directoryResponse = await apiRequest("/api/directory");
+    expect(directoryResponse.status).toBe(503);
+    expect(await directoryResponse.json()).toEqual({ error: "INSTANCE_ROOT_NOT_CONFIGURED" });
+    env.ROOT_STRONGHOLD = "medium5";
   });
 
   it("enforces the deployment emote switch at the API boundary", async () => {

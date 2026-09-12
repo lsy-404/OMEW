@@ -9,7 +9,7 @@
 // read for any of these fields - the table and its columns are left in place as
 // archival/rollback-safe dead data, not dropped.
 
-import type { InstanceConfig, RootRequirement, StrongholdCreationPolicy } from "./types";
+import type { InstanceConfig, InstanceMode, RootRequirement, SsoMode, StrongholdCreationPolicy } from "./types";
 
 export interface InstanceBranding {
   logo_url: string | null;
@@ -17,6 +17,15 @@ export interface InstanceBranding {
   builtin_emotes_enabled: boolean;
   reactions_enabled: boolean;
   art_assets_enabled: boolean;
+}
+
+export interface SsoRuntimeConfig {
+  mode: SsoMode;
+  issuer: string;
+  client_id: string;
+  client_secret: string;
+  provider_name: string;
+  configured: boolean;
 }
 
 function parseBool(value: string | undefined, fallback: boolean): boolean {
@@ -56,8 +65,53 @@ function parseStrongholdCreation(value: string | undefined): StrongholdCreationP
   return v && (STRONGHOLD_CREATION_POLICIES as readonly string[]).includes(v) ? (v as StrongholdCreationPolicy) : "restricted";
 }
 
+const INSTANCE_MODES: readonly InstanceMode[] = ["multi", "single"];
+const ROOT_STRONGHOLD_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+function parseInstanceMode(value: string | undefined): InstanceMode {
+  const mode = value?.trim();
+  return mode && (INSTANCE_MODES as readonly string[]).includes(mode) ? mode as InstanceMode : "multi";
+}
+
+function parseRootStronghold(value: string | undefined): string | null {
+  const root = value?.trim() ?? "";
+  return ROOT_STRONGHOLD_RE.test(root) ? root : null;
+}
+
+const SSO_MODES: readonly SsoMode[] = ["disabled", "optional", "required"];
+function parseSsoMode(value: string | undefined): SsoMode {
+  const mode = value?.trim();
+  return mode && (SSO_MODES as readonly string[]).includes(mode) ? mode as SsoMode : "disabled";
+}
+
+export function isValidOidcIssuer(value: string): boolean {
+  try {
+    const issuer = new URL(value);
+    const localDevelopment = issuer.protocol === "http:" && (issuer.hostname === "localhost" || issuer.hostname === "127.0.0.1");
+    return (issuer.protocol === "https:" || localDevelopment) && !issuer.username && !issuer.password && !issuer.search && !issuer.hash;
+  } catch {
+    return false;
+  }
+}
+
+export function getSsoConfig(env: Env): SsoRuntimeConfig {
+  const issuer = (env.SSO_ISSUER?.trim() ?? "").replace(/\/+$/, "");
+  const clientId = env.SSO_CLIENT_ID?.trim() ?? "";
+  const clientSecret = env.SSO_CLIENT_SECRET ?? "";
+  const providerName = env.SSO_PROVIDER_NAME?.trim() || "SSO";
+  return {
+    mode: parseSsoMode(env.SSO_MODE),
+    issuer,
+    client_id: clientId,
+    client_secret: clientSecret,
+    provider_name: providerName,
+    configured: isValidOidcIssuer(issuer) && clientId.length > 0 && clientSecret.length > 0,
+  };
+}
+
 export function getInstanceConfig(env: Env): InstanceConfig {
   return {
+    instance_mode: parseInstanceMode(env.INSTANCE_MODE),
+    root_stronghold: parseRootStronghold(env.ROOT_STRONGHOLD),
     allow_root: parseBool(env.ALLOW_ROOT, true),
     root_requirements: parseRootRequirements(env.ROOT_REQUIREMENTS),
     trusted_identity_servers: parseCsv(env.TRUSTED_IDENTITY_SERVERS, ["*"]),

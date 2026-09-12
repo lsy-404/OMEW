@@ -8,6 +8,7 @@ import { ApiRequestError } from './errors'
 import type { RoomSocketHandlers, RoomTransport } from './roomSocket'
 import type {
   AdminInstanceConfig,
+  AdminInstanceConfigPatch,
   AdminUsersPage,
   AvatarUploadResult,
   CoverUploadResult,
@@ -69,10 +70,12 @@ interface MockUser extends AuthUser {
   totp_enabled: boolean
 }
 
-// This fixed object stands in for the deployment environment snapshot.
+// This object stands in for the deployment environment snapshot.
 // stronghold_creation_policy is seeded to application so the pending review
 // section has something to show during a mock visual check.
 const config: AdminInstanceConfig = {
+  instance_mode: 'multi',
+  root_stronghold: null,
   allow_root: true,
   root_requirements: ['email'],
   trusted_identity_servers: ['*'],
@@ -82,6 +85,11 @@ const config: AdminInstanceConfig = {
   stronghold_creation_policy: 'application',
   stronghold_creators: [],
   allow_guest_browsing: true,
+  sso_mode: 'disabled',
+  sso_issuer: '',
+  sso_client_id: '',
+  sso_provider_name: 'SSO',
+  sso_client_secret_configured: false,
 }
 
 // Bundled reaction emotes are merged by useEmotes for both real and mock API
@@ -801,17 +809,23 @@ export class MockRoomTransport implements RoomTransport {
 }
 
 export const mockApi = {
-  async exchangeStarDustSession(): Promise<never> {
+  async completeOidcLogin(): Promise<never> {
     throw new ApiRequestError('SSO_NOT_CONFIGURED', 503)
   },
 
-  async getInstanceConfig() {
+    async getInstanceConfig() {
     return delay({
+      instance_mode: config.instance_mode,
+      root_stronghold: config.root_stronghold
+        ? { id: config.root_stronghold, name: config.root_stronghold, slug: config.root_stronghold }
+        : null,
       allow_root: config.allow_root,
       root_requirements: config.root_requirements,
       stronghold_creation: config.stronghold_creation_policy,
       allow_guest_browsing: config.allow_guest_browsing,
-      fixed_stronghold: null,
+      sso_mode: config.sso_mode,
+      sso_enabled: config.sso_mode !== 'disabled' && config.sso_client_secret_configured && !!config.sso_issuer && !!config.sso_client_id,
+      sso_provider_name: config.sso_provider_name,
       logo_url: null,
       emotes_enabled: true,
       builtin_emotes_enabled: true,
@@ -1068,9 +1082,11 @@ export const mockApi = {
     return delay({ ...config })
   },
 
-  async patchAdminConfig(token: string, patch: Partial<AdminInstanceConfig>) {
+  async patchAdminConfig(token: string, patch: AdminInstanceConfigPatch) {
     requireOwner(token)
-    Object.assign(config, patch)
+    const { sso_client_secret: clientSecret, ...settings } = patch
+    Object.assign(config, settings)
+    if (clientSecret) config.sso_client_secret_configured = true
     return delay({ ...config })
   },
 

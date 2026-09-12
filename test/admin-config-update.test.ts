@@ -3,11 +3,13 @@ import {
   buildAdminConfigBindings,
   updateWorkerInstanceConfig,
   validateAdminConfigPatch,
-  type AdminConfigEnvField,
+  type AdminConfigPatchField,
 } from "../server/src/api";
 import type { InstanceConfig } from "../server/src/types";
 
 const CURRENT: InstanceConfig = {
+  instance_mode: "multi",
+  root_stronghold: null,
   allow_root: true,
   root_requirements: [],
   trusted_identity_servers: ["*"],
@@ -27,7 +29,7 @@ function managedEnv(): Env {
   } as Env;
 }
 
-async function errorCode(result: Response | Partial<Record<AdminConfigEnvField, unknown>>): Promise<string | null> {
+async function errorCode(result: Response | Partial<Record<AdminConfigPatchField, unknown>>): Promise<string | null> {
   if (!(result instanceof Response)) return null;
   return ((await result.json()) as { error: string }).error;
 }
@@ -48,6 +50,19 @@ describe("admin config validation", () => {
   it("allows wildcard only for trusted identity servers", async () => {
     expect(await errorCode(validateAdminConfigPatch({ federation_peers: ["*"] }, CURRENT))).toBe("CONFIG_INVALID");
     expect(await errorCode(validateAdminConfigPatch({ stronghold_creators: ["@alice:*"] }, CURRENT))).toBe("CONFIG_INVALID");
+  });
+
+  it("validates root and OIDC field shapes before the cross-field deployment check", async () => {
+    expect(await errorCode(validateAdminConfigPatch({ instance_mode: "single" }, CURRENT))).toBeNull();
+    expect(await errorCode(validateAdminConfigPatch({ sso_mode: "optional", sso_issuer: "not-a-url" }, CURRENT))).toBe("CONFIG_INVALID");
+    expect(await errorCode(validateAdminConfigPatch({ sso_mode: "required", sso_issuer: "https://identity.example", sso_client_id: "omew" }, CURRENT))).toBeNull();
+    const deployment = await updateWorkerInstanceConfig(managedEnv(), {
+      SSO_MODE: "required",
+      SSO_ISSUER: "https://identity.example",
+      SSO_CLIENT_ID: "omew",
+    }, vi.fn());
+    expect(deployment.status).toBe(400);
+    expect(await deployment.json()).toEqual({ error: "CONFIG_INVALID" });
   });
 
   it("rejects unknown fields, duplicate domains, and a quota below the file limit", async () => {

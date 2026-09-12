@@ -70,6 +70,9 @@ export interface StrongholdTokenClaims {
 // server_owner is unique (the instance operator); server_admin is appointable
 // by server_owner. Neither propagates over federation.
 export type ServerRole = "owner" | "admin" | "user";
+export type AuthSource = "local" | "sso";
+export type SsoMode = "disabled" | "optional" | "required";
+export type InstanceMode = "multi" | "single";
 
 // Session claims (see auth.ts for the HMAC signing mechanism) - not a WS token,
 // used for HTTP bearer auth. Issued by /api/register and /api/login (users.ts).
@@ -81,6 +84,7 @@ export interface SessionTokenClaims {
   typ: "session";
   actor: string;
   server_role: ServerRole;
+  auth_source: AuthSource;
   exp: number;
   jti: string;
 }
@@ -121,13 +125,15 @@ export type RootRequirement = "email" | "phone" | "code";
 // m0-protocol §7.9: self-operated instance governance policies.
 export type StrongholdCreationPolicy = "open" | "restricted" | "application";
 
-export interface FixedStronghold {
+export interface RootStronghold {
   id: string;
   name: string;
   slug: string;
 }
 
 export interface InstanceConfig {
+  instance_mode: InstanceMode;
+  root_stronghold: string | null;
   allow_root: boolean;
   root_requirements: RootRequirement[];
   trusted_identity_servers: string[];

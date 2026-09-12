@@ -11,8 +11,19 @@ import type {
   RegistrationResponseJSON,
 } from "@simplewebauthn/server";
 import { base64UrlDecode, base64UrlEncode, dummyPasswordFields, hashPassword, newJti, signToken, verifyPassword, verifyToken } from "./auth";
-import { getInstanceBranding, getInstanceConfig } from "./config";
+import { getInstanceBranding, getInstanceConfig, getSsoConfig, isValidOidcIssuer } from "./config";
 import { handleInbox } from "./inbox";
+import {
+  beginOidcAuthorization,
+  clearOidcTransactionCookie,
+  consumeOidcLoginCompletion,
+  createOidcLoginCompletion,
+  finishOidcAuthorization,
+  mapOidcIdentity,
+  OidcError,
+  oidcLoginCompletionRedirect,
+  type OidcUserRow,
+} from "./oidc";
 import type { EffectivePermissions } from "./permissions";
 import { canAccessRestrictedRoom, synthesizeEffectivePermissions } from "./permissions";
 import { deriveSlugBase, featurePaused, fetchServerGroupsForLocalpart, type ConfigRow, type FeatureRestrictionSnapshot, type MemberRow, type RestrictedFeature, type RoomRow, type ServerFeatureOverride } from "./stronghold-do";
@@ -22,11 +33,13 @@ import {
   instanceDomain,
   typeToKind,
   withRequestInstanceDomain,
+  type AuthSource,
   type Role,
+  type RootStronghold,
   type RoomTokenClaims,
   type RoomType,
   type ServerRole,
-  type FixedStronghold,
+  type SsoMode,
   type SessionTokenClaims,
   type StrongholdTokenClaims,
   type TotpPendingTokenClaims,
@@ -61,7 +74,40 @@ const TOTP_LOCKOUT_S = 15 * 60;
 const ADMIN_CONFIG_ARRAY_MAX = 100;
 const ADMIN_CONFIG_DOMAIN_MAX = 253;
 const ADMIN_CONFIG_ACTOR_LOCALPART_MAX = 64;
-const ADMIN_CONFIG_ALLOWED_FIELDS = new Set([
+const ADMIN_CONFIG_TEXT_MAX = 2048;
+const ADMIN_CONFIG_SECRET_MAX = 4096;
+const ROOT_STRONGHOLD_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+const ROOT_SETUP_PATHS = new Set([
+  "/api/instance/config",
+  "/api/admin/instance/config",
+  "/api/auth/oidc/start",
+  "/api/auth/oidc/callback",
+  "/api/auth/oidc/complete",
+  "/api/register",
+  "/api/login",
+  "/api/login/totp",
+  "/api/login/passkey",
+]);
+export type AdminConfigEnvField =
+  | "INSTANCE_MODE"
+  | "ROOT_STRONGHOLD"
+  | "ALLOW_ROOT"
+  | "ROOT_REQUIREMENTS"
+  | "TRUSTED_IDENTITY_SERVERS"
+  | "FEDERATION_PEERS"
+  | "STRONGHOLD_CREATION"
+  | "STRONGHOLD_CREATORS"
+  | "ALLOW_GUEST_BROWSING"
+  | "MAX_FILE_BYTES"
+  | "USER_STORAGE_QUOTA_BYTES"
+  | "SSO_MODE"
+  | "SSO_ISSUER"
+  | "SSO_CLIENT_ID"
+  | "SSO_PROVIDER_NAME";
+export type AdminConfigPatchField = AdminConfigEnvField | "SSO_CLIENT_SECRET";
+const ADMIN_CONFIG_ENV_FIELDS = new Set<AdminConfigEnvField>([
+  "INSTANCE_MODE",
+  "ROOT_STRONGHOLD",
   "ALLOW_ROOT",
   "ROOT_REQUIREMENTS",
   "TRUSTED_IDENTITY_SERVERS",
@@ -71,21 +117,18 @@ const ADMIN_CONFIG_ALLOWED_FIELDS = new Set([
   "ALLOW_GUEST_BROWSING",
   "MAX_FILE_BYTES",
   "USER_STORAGE_QUOTA_BYTES",
-] as const);
-const STAR_DUST_SSO_ISSUER = "stardustinfinity.top";
-const STAR_DUST_SSO_AUDIENCE = "omew.stardustinfinity.top";
-const FIXED_STRONGHOLD_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
-export type AdminConfigEnvField =
-  | "ALLOW_ROOT"
-  | "ROOT_REQUIREMENTS"
-  | "TRUSTED_IDENTITY_SERVERS"
-  | "FEDERATION_PEERS"
-  | "STRONGHOLD_CREATION"
-  | "STRONGHOLD_CREATORS"
-  | "ALLOW_GUEST_BROWSING"
-  | "MAX_FILE_BYTES"
-  | "USER_STORAGE_QUOTA_BYTES";
-const ADMIN_CONFIG_ALIASES: Record<string, AdminConfigEnvField> = {
+  "SSO_MODE",
+  "SSO_ISSUER",
+  "SSO_CLIENT_ID",
+  "SSO_PROVIDER_NAME",
+]);
+const ADMIN_CONFIG_ALLOWED_FIELDS = new Set<AdminConfigPatchField>([
+  ...ADMIN_CONFIG_ENV_FIELDS,
+  "SSO_CLIENT_SECRET",
+]);
+const ADMIN_CONFIG_ALIASES: Record<string, AdminConfigPatchField> = {
+  instance_mode: "INSTANCE_MODE",
+  root_stronghold: "ROOT_STRONGHOLD",
   allow_root: "ALLOW_ROOT",
   root_requirements: "ROOT_REQUIREMENTS",
   trusted_identity_servers: "TRUSTED_IDENTITY_SERVERS",
@@ -95,9 +138,16 @@ const ADMIN_CONFIG_ALIASES: Record<string, AdminConfigEnvField> = {
   allow_guest_browsing: "ALLOW_GUEST_BROWSING",
   max_file_bytes: "MAX_FILE_BYTES",
   user_storage_quota_bytes: "USER_STORAGE_QUOTA_BYTES",
+  sso_mode: "SSO_MODE",
+  sso_issuer: "SSO_ISSUER",
+  sso_client_id: "SSO_CLIENT_ID",
+  sso_provider_name: "SSO_PROVIDER_NAME",
+  sso_client_secret: "SSO_CLIENT_SECRET",
 };
 
-const ADMIN_CONFIG_FIELDS: Record<AdminConfigEnvField, keyof ReturnType<typeof getInstanceConfig>> = {
+const ADMIN_CONFIG_FIELDS: Record<AdminConfigEnvField, string> = {
+  INSTANCE_MODE: "instance_mode",
+  ROOT_STRONGHOLD: "root_stronghold",
   ALLOW_ROOT: "allow_root",
   ROOT_REQUIREMENTS: "root_requirements",
   TRUSTED_IDENTITY_SERVERS: "trusted_identity_servers",
@@ -107,6 +157,10 @@ const ADMIN_CONFIG_FIELDS: Record<AdminConfigEnvField, keyof ReturnType<typeof g
   ALLOW_GUEST_BROWSING: "allow_guest_browsing",
   MAX_FILE_BYTES: "max_file_bytes",
   USER_STORAGE_QUOTA_BYTES: "user_storage_quota_bytes",
+  SSO_MODE: "sso_mode",
+  SSO_ISSUER: "sso_issuer",
+  SSO_CLIENT_ID: "sso_client_id",
+  SSO_PROVIDER_NAME: "sso_provider_name",
 };
 
 function isConfigDomain(value: unknown, options: { wildcard?: boolean; requireDot?: boolean } = {}): value is string {
@@ -122,17 +176,21 @@ function isConfigActor(value: unknown): value is string {
   return !!match && match[1]!.length <= ADMIN_CONFIG_ACTOR_LOCALPART_MAX && isConfigDomain(match[2]);
 }
 
-export function validateAdminConfigPatch(body: Record<string, unknown>, current: ReturnType<typeof getInstanceConfig>): Response | Partial<Record<AdminConfigEnvField, unknown>> {
+export function validateAdminConfigPatch(body: Record<string, unknown>, current: ReturnType<typeof getInstanceConfig>): Response | Partial<Record<AdminConfigPatchField, unknown>> {
   const keys = Object.keys(body);
   if (keys.length === 0) {
     return apiError(400, "CONFIG_INVALID");
   }
-  const patch: Partial<Record<AdminConfigEnvField, unknown>> = {};
+  const patch: Partial<Record<AdminConfigPatchField, unknown>> = {};
   for (const inputKey of keys) {
-    const key = (ADMIN_CONFIG_ALLOWED_FIELDS.has(inputKey as AdminConfigEnvField) ? inputKey : ADMIN_CONFIG_ALIASES[inputKey]) as AdminConfigEnvField | undefined;
+    const key = (ADMIN_CONFIG_ALLOWED_FIELDS.has(inputKey as AdminConfigPatchField) ? inputKey : ADMIN_CONFIG_ALIASES[inputKey]) as AdminConfigPatchField | undefined;
     if (!key || key in patch) return apiError(400, "CONFIG_INVALID");
     const value = body[inputKey];
-    if (key === "ALLOW_ROOT" || key === "ALLOW_GUEST_BROWSING") {
+    if (key === "INSTANCE_MODE") {
+      if (value !== "multi" && value !== "single") return apiError(400, "CONFIG_INVALID");
+    } else if (key === "ROOT_STRONGHOLD") {
+      if (typeof value !== "string" || (value !== "" && !ROOT_STRONGHOLD_RE.test(value))) return apiError(400, "CONFIG_INVALID");
+    } else if (key === "ALLOW_ROOT" || key === "ALLOW_GUEST_BROWSING") {
       if (typeof value !== "boolean") return apiError(400, "CONFIG_INVALID");
     } else if (key === "MAX_FILE_BYTES" || key === "USER_STORAGE_QUOTA_BYTES") {
       if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) return apiError(400, "CONFIG_INVALID");
@@ -153,6 +211,18 @@ export function validateAdminConfigPatch(body: Record<string, unknown>, current:
       if (!Array.isArray(value) || value.length > ADMIN_CONFIG_ARRAY_MAX || value.some((entry) => !isConfigActor(entry))) {
         return apiError(400, "CONFIG_INVALID");
       }
+    } else if (key === "SSO_MODE") {
+      if (value !== "disabled" && value !== "optional" && value !== "required") return apiError(400, "CONFIG_INVALID");
+    } else if (key === "SSO_ISSUER") {
+      if (typeof value !== "string" || value.length > ADMIN_CONFIG_TEXT_MAX || (value !== "" && !isValidOidcIssuer(value))) {
+        return apiError(400, "CONFIG_INVALID");
+      }
+    } else if (key === "SSO_CLIENT_ID") {
+      if (typeof value !== "string" || value.length > 512) return apiError(400, "CONFIG_INVALID");
+    } else if (key === "SSO_PROVIDER_NAME") {
+      if (typeof value !== "string" || [...value].length > 64) return apiError(400, "CONFIG_INVALID");
+    } else if (key === "SSO_CLIENT_SECRET") {
+      if (typeof value !== "string" || value.length === 0 || value.length > ADMIN_CONFIG_SECRET_MAX) return apiError(400, "CONFIG_INVALID");
     }
     patch[key] = value;
   }
@@ -176,7 +246,7 @@ export function buildAdminConfigBindings(
   const updated = new Set<AdminConfigEnvField>();
   for (const binding of existingBindings) {
     const name = binding.name;
-    const field = ADMIN_CONFIG_ALLOWED_FIELDS.has(name as AdminConfigEnvField) ? name as AdminConfigEnvField : null;
+    const field = ADMIN_CONFIG_ENV_FIELDS.has(name as AdminConfigEnvField) ? name as AdminConfigEnvField : null;
     if (field && field in patch) {
       bindings.push({ name, type: "plain_text", text: configValueToEnvText(field, patch[field]) });
       updated.add(field);
@@ -192,13 +262,76 @@ export function buildAdminConfigBindings(
 
 type AdminConfigFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
+function adminConfigSnapshot(
+  env: Env,
+  patch: Partial<Record<AdminConfigEnvField, unknown>> = {},
+  secretConfigured = Boolean(env.SSO_CLIENT_SECRET),
+): Record<string, unknown> {
+  const sso = getSsoConfig(env);
+  const snapshot: Record<string, unknown> = {
+    ...getInstanceConfig(env),
+    sso_mode: sso.mode,
+    sso_issuer: sso.issuer,
+    sso_client_id: sso.client_id,
+    sso_provider_name: sso.provider_name,
+    sso_client_secret_configured: secretConfigured,
+  };
+  for (const [field, value] of Object.entries(patch)) {
+    snapshot[ADMIN_CONFIG_FIELDS[field as AdminConfigEnvField]] = value;
+  }
+  return snapshot;
+}
+
 export async function updateWorkerInstanceConfig(
   env: Env,
-  patch: Partial<Record<AdminConfigEnvField, unknown>>,
+  patch: Partial<Record<AdminConfigPatchField, unknown>>,
   fetcher: AdminConfigFetch = fetch
 ): Promise<Response> {
   if (!env.CF_API_TOKEN || !env.CF_ACCOUNT_ID || !env.CF_WORKER_NAME) return apiError(503, "CONFIG_UPSTREAM_UNAVAILABLE");
-  const endpoint = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.CF_ACCOUNT_ID)}/workers/scripts/${encodeURIComponent(env.CF_WORKER_NAME)}/settings`;
+  const currentPolicy = getInstanceConfig(env);
+  const currentSso = getSsoConfig(env);
+  const targetInstanceMode = (patch.INSTANCE_MODE ?? currentPolicy.instance_mode) as "multi" | "single";
+  const targetRoot = (patch.ROOT_STRONGHOLD ?? currentPolicy.root_stronghold ?? "") as string;
+  if (targetInstanceMode === "single" && !ROOT_STRONGHOLD_RE.test(targetRoot)) return apiError(400, "CONFIG_INVALID");
+  const targetSsoMode = (patch.SSO_MODE ?? currentSso.mode) as SsoMode;
+  const targetIssuer = (patch.SSO_ISSUER ?? currentSso.issuer) as string;
+  const targetClientId = (patch.SSO_CLIENT_ID ?? currentSso.client_id) as string;
+  const secretConfigured = typeof patch.SSO_CLIENT_SECRET === "string" || Boolean(currentSso.client_secret);
+  if (targetSsoMode !== "disabled" && (!isValidOidcIssuer(targetIssuer) || !targetClientId || !secretConfigured)) {
+    return apiError(400, "CONFIG_INVALID");
+  }
+
+  const settingsPatch: Partial<Record<AdminConfigEnvField, unknown>> = {};
+  for (const [field, value] of Object.entries(patch)) {
+    if (ADMIN_CONFIG_ENV_FIELDS.has(field as AdminConfigEnvField)) settingsPatch[field as AdminConfigEnvField] = value;
+  }
+  const scriptEndpoint = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.CF_ACCOUNT_ID)}/workers/scripts/${encodeURIComponent(env.CF_WORKER_NAME)}`;
+  if (typeof patch.SSO_CLIENT_SECRET === "string") {
+    let secretResponse: Response;
+    try {
+      secretResponse = await fetcher(`${scriptEndpoint}/secrets`, {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${env.CF_API_TOKEN}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "SSO_CLIENT_SECRET", text: patch.SSO_CLIENT_SECRET, type: "secret_text" }),
+        signal: AbortSignal.timeout(5_000),
+      });
+    } catch {
+      return apiError(502, "CONFIG_UPSTREAM_UNAVAILABLE");
+    }
+    if (!secretResponse.ok) return apiError(502, "CONFIG_UPSTREAM_ERROR");
+    try {
+      const payload = (await secretResponse.json()) as { success?: unknown };
+      if (payload.success !== true) return apiError(502, "CONFIG_UPSTREAM_ERROR");
+    } catch {
+      return apiError(502, "CONFIG_UPSTREAM_ERROR");
+    }
+  }
+
+  if (Object.keys(settingsPatch).length === 0) {
+    return json({ ...adminConfigSnapshot(env, {}, secretConfigured), source: "env-pending" });
+  }
+
+  const endpoint = `${scriptEndpoint}/settings`;
   let settingsResponse: Response;
   try {
     settingsResponse = await fetcher(endpoint, {
@@ -221,7 +354,7 @@ export async function updateWorkerInstanceConfig(
     return apiError(502, "CONFIG_UPSTREAM_ERROR");
   }
 
-  const bindings = buildAdminConfigBindings(existingBindings, patch);
+  const bindings = buildAdminConfigBindings(existingBindings, settingsPatch);
   const form = new FormData();
   form.append("settings", new Blob([JSON.stringify({ bindings })], { type: "application/json" }), "settings.json");
   let updateResponse: Response;
@@ -242,7 +375,7 @@ export async function updateWorkerInstanceConfig(
   } catch {
     return apiError(502, "CONFIG_UPSTREAM_ERROR");
   }
-  return json({ ...getInstanceConfig(env), ...Object.fromEntries(Object.entries(patch).map(([field, value]) => [ADMIN_CONFIG_FIELDS[field as AdminConfigEnvField], value])), source: "env-pending" });
+  return json({ ...adminConfigSnapshot(env, settingsPatch, secretConfigured), source: "env-pending" });
 }
 
 // Claims a signed challenge/pending jti for one-time use. Expired rows are
@@ -332,43 +465,23 @@ function apiError(status: number, code: string): Response {
   return json({ error: code }, status);
 }
 
-function getFixedStronghold(env: Env): FixedStronghold | null {
-  const value = env.FIXED_STRONGHOLD?.trim();
-  if (!value) return null;
-  if (!FIXED_STRONGHOLD_RE.test(value)) throw new Error("invalid FIXED_STRONGHOLD");
-  return { id: value, name: value, slug: value };
-}
-
-async function ensureFixedStronghold(env: Env): Promise<FixedStronghold | null> {
-  const fixed = getFixedStronghold(env);
-  if (!fixed) return null;
-  const ownerActor = `@system:${instanceDomain(env)}`;
-  const config = await env.STRONGHOLD_DO.getByName(fixed.id).ensureConfigWithDefaults(
-    fixed.id,
-    fixed.name,
-    "public",
-    ownerActor,
-    "星尘站专属据点",
-    fixed.slug,
-  );
+async function ensureRootStronghold(env: Env, rootSlug: string | null): Promise<RootStronghold | null> {
+  if (!rootSlug) return null;
+  const indexed = await env.DB.prepare("SELECT stronghold_id FROM stronghold_slug_index WHERE slug = ?")
+    .bind(rootSlug)
+    .first<{ stronghold_id: string }>();
+  const strongholdId = indexed?.stronghold_id ?? rootSlug;
+  const config = await env.STRONGHOLD_DO.getByName(strongholdId).getConfig();
+  if (!config || config.slug !== rootSlug) return null;
   return { id: config.id, name: config.name, slug: config.slug };
 }
 
 function strongholdPathId(path: string): string | null {
   if (path.startsWith("/api/stronghold/")) return path.split("/")[3] ?? null;
+  if (path.startsWith("/api/admin/strongholds/")) return path.split("/")[4] ?? null;
   if (path.startsWith("/stronghold/")) return path.split("/")[2] ?? null;
   return null;
 }
-
-type StarDustSsoClaims = {
-  typ: "star_dust_sso";
-  iss: typeof STAR_DUST_SSO_ISSUER;
-  aud: typeof STAR_DUST_SSO_AUDIENCE;
-  sub: string;
-  username: string;
-  email: string | null;
-  exp: number;
-};
 
 async function readJsonBody(request: Request): Promise<Record<string, unknown> | null> {
   const len = request.headers.get("Content-Length");
@@ -434,6 +547,13 @@ async function clearExpiredGlobalBan(env: Env, localpart: string): Promise<void>
     .run();
 }
 
+async function localUserByLocalpart(env: Env, localpart: string): Promise<OidcUserRow | null> {
+  return env.DB.prepare(
+    "SELECT localpart, display_name, avatar, cover, bio, status, server_role, email, email_verified, totp_enabled " +
+      "FROM users WHERE localpart = ?",
+  ).bind(localpart).first<OidcUserRow>();
+}
+
 // Full session claims. Local server roles are mutable authorization state, so
 // they are re-resolved from D1 instead of trusting the token's issuance-time
 // snapshot. Remote actors can never receive a local server-role overlay.
@@ -441,7 +561,16 @@ async function requireSession(request: Request, env: Env): Promise<SessionTokenC
   const header = request.headers.get("Authorization");
   if (!header?.startsWith("Bearer ")) return apiError(401, "AUTH_REQUIRED");
   const claims = await verifyToken<SessionTokenClaims>(header.slice(7), env.DEV_TOKEN_SECRET);
-  if (!claims || claims.typ !== "session") return apiError(401, "AUTH_REQUIRED");
+  if (!claims || claims.typ !== "session" || (claims.auth_source !== "local" && claims.auth_source !== "sso")) {
+    return apiError(401, "AUTH_REQUIRED");
+  }
+  const sso = getSsoConfig(env);
+  if (sso.mode === "required") {
+    if (!sso.configured) return apiError(503, "SSO_NOT_CONFIGURED");
+    if (claims.auth_source !== "sso") return apiError(401, "SSO_REQUIRED");
+  } else if (sso.mode === "disabled" && claims.auth_source !== "local") {
+    return apiError(401, "SSO_DISABLED");
+  }
   if (domainOfActor(claims.actor) !== instanceDomain(env)) {
     return { ...claims, server_role: "user" };
   }
@@ -455,57 +584,8 @@ async function requireSession(request: Request, env: Env): Promise<SessionTokenC
   return { ...claims, server_role: current.server_role };
 }
 
-async function exchangeStarDustSession(body: Record<string, unknown>, env: Env): Promise<Response> {
-  if (!env.STAR_DUST_SSO_SECRET) return apiError(503, "SSO_NOT_CONFIGURED");
-  const rawToken = typeof body.token === "string" ? body.token : "";
-  const claims = await verifyToken<StarDustSsoClaims>(rawToken, env.STAR_DUST_SSO_SECRET);
-  if (
-    !claims ||
-    claims.typ !== "star_dust_sso" ||
-    claims.iss !== STAR_DUST_SSO_ISSUER ||
-    claims.aud !== STAR_DUST_SSO_AUDIENCE ||
-    !/^[A-Za-z0-9_-]{1,48}$/.test(claims.sub) ||
-    typeof claims.username !== "string" ||
-    !claims.username.trim()
-  ) {
-    return apiError(401, "SSO_INVALID");
-  }
-
-  const localpart = `star-${claims.sub}`;
-  const displayName = claims.username.trim().slice(0, 64);
-  const email = typeof claims.email === "string" && isValidEmail(claims.email.trim()) ? claims.email.trim() : null;
-  const now = nowS();
-
-  await env.DB.prepare(
-    "INSERT INTO users (localpart, display_name, status, created_at, email, email_verified) VALUES (?, ?, 'active', ?, ?, 0) " +
-      "ON CONFLICT(localpart) DO UPDATE SET display_name = excluded.display_name, email = excluded.email"
-  )
-    .bind(localpart, displayName, now, email)
-    .run();
-
-  const user = await env.DB.prepare(
-    "SELECT localpart, display_name, avatar, cover, bio, status, server_role, email, email_verified, totp_enabled " +
-      "FROM users WHERE localpart = ?"
-  )
-    .bind(localpart)
-    .first<{
-      localpart: string;
-      display_name: string;
-      avatar: string | null;
-      cover: string | null;
-      bio: string | null;
-      status: string;
-      server_role: ServerRole;
-      email: string | null;
-      email_verified: number;
-      totp_enabled: number;
-    }>();
-  if (!user || user.status !== "active") return apiError(403, "ACCOUNT_DISABLED");
-
-  const actor = `@${localpart}:${instanceDomain(env)}`;
-  const token = await issueSessionToken(actor, user.server_role, env);
-  await touchLastActive(env, localpart);
-  return json({ token, user: toPublicUser(user, actor) });
+function localAuthenticationRejection(env: Env): Response | null {
+  return getSsoConfig(env).mode === "required" ? apiError(403, "SSO_REQUIRED") : null;
 }
 
 async function touchLastActive(env: Env, localpart: string, previous: number | null = null, now = Date.now()): Promise<void> {
@@ -667,32 +747,89 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
   env = withRequestInstanceDomain(env, url.hostname);
   const path = url.pathname;
   const method = request.method;
-  const fixedStronghold = await ensureFixedStronghold(env);
+  const instanceConfig = getInstanceConfig(env);
+  if (instanceConfig.instance_mode === "single" && !instanceConfig.root_stronghold && !ROOT_SETUP_PATHS.has(path)) {
+    return apiError(503, "INSTANCE_ROOT_NOT_CONFIGURED");
+  }
+  const rootStronghold = await ensureRootStronghold(
+    env,
+    instanceConfig.instance_mode === "single" ? instanceConfig.root_stronghold : null,
+  );
+  if (instanceConfig.instance_mode === "single" && !rootStronghold && !ROOT_SETUP_PATHS.has(path)) {
+    return apiError(503, "INSTANCE_ROOT_NOT_FOUND");
+  }
   const requestedStrongholdId = strongholdPathId(path);
-  if (fixedStronghold && requestedStrongholdId && requestedStrongholdId !== fixedStronghold.id) {
+  if (rootStronghold && requestedStrongholdId && requestedStrongholdId !== rootStronghold.id) {
     return apiError(404, "NOT_FOUND");
   }
 
   // ---- instance identity policy + registration/login (real user system) ---------
 
   if (method === "GET" && path === "/api/instance/config") {
-    const config = await getInstanceConfig(env);
+    const config = instanceConfig;
+    const sso = getSsoConfig(env);
     return json({
+      instance_mode: config.instance_mode,
+      root_stronghold: rootStronghold,
       allow_root: config.allow_root,
       root_requirements: config.root_requirements,
       // Policy value only (open/restricted/application) - enough for the client
       // to shape its "create stronghold" entry point; creators/peers stay admin-only.
       stronghold_creation: config.stronghold_creation_policy,
       allow_guest_browsing: config.allow_guest_browsing,
-      fixed_stronghold: fixedStronghold,
+      sso_mode: sso.mode,
+      sso_enabled: sso.mode !== "disabled" && sso.configured,
+      sso_provider_name: sso.provider_name,
       ...getInstanceBranding(env),
     });
   }
 
-  if (method === "POST" && path === "/api/integration/star-dust/session") {
+  if (method === "GET" && path === "/api/auth/oidc/start") {
+    const sso = getSsoConfig(env);
+    if (sso.mode === "disabled") return apiError(403, "SSO_DISABLED");
+    try {
+      return await beginOidcAuthorization(request, env, sso);
+    } catch (error) {
+      if (error instanceof OidcError) return apiError(error.status, error.code);
+      throw error;
+    }
+  }
+
+  if (method === "GET" && path === "/api/auth/oidc/callback") {
+    const sso = getSsoConfig(env);
+    if (sso.mode === "disabled") return apiError(403, "SSO_DISABLED");
+    try {
+      const result = await finishOidcAuthorization(request, env, sso);
+      const mapped = await mapOidcIdentity(env, result.identity);
+      if (mapped.status !== "active") return apiError(403, "ACCOUNT_DISABLED");
+      const completion = await createOidcLoginCompletion(env, mapped.localpart);
+      return oidcLoginCompletionRedirect(request, env, result.return_to, completion);
+    } catch (error) {
+      if (error instanceof OidcError) {
+        const response = apiError(error.status, error.code);
+        response.headers.append("Set-Cookie", clearOidcTransactionCookie(request));
+        return response;
+      }
+      throw error;
+    }
+  }
+
+  if (method === "POST" && path === "/api/auth/oidc/complete") {
     const body = await readJsonBody(request);
     if (!body) return apiError(413, "PAYLOAD_INVALID");
-    return exchangeStarDustSession(body, env);
+    const completion = typeof body.code === "string" ? body.code : "";
+    const localpart = await consumeOidcLoginCompletion(env, completion);
+    if (!localpart) return apiError(401, "SSO_COMPLETION_INVALID");
+    const sso = getSsoConfig(env);
+    if (sso.mode === "disabled") return apiError(401, "SSO_DISABLED");
+    if (sso.mode === "required" && !sso.configured) return apiError(503, "SSO_NOT_CONFIGURED");
+    await clearExpiredGlobalBan(env, localpart);
+    const user = await localUserByLocalpart(env, localpart);
+    if (!user || user.status !== "active") return apiError(403, "ACCOUNT_DISABLED");
+    const actor = `@${localpart}:${instanceDomain(env)}`;
+    const token = await issueSessionToken(actor, user.server_role, "sso", env);
+    await touchLastActive(env, localpart);
+    return json({ token, user: toPublicUser(user, actor), auth_source: "sso" });
   }
 
   const branding = getInstanceBranding(env);
@@ -707,7 +844,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
   if (method === "GET" && path === "/api/directory") {
     const config = await getInstanceConfig(env);
     if (!config.allow_guest_browsing) return apiError(404, "NOT_FOUND");
-    return json({ strongholds: await listPublicDirectory(env, fixedStronghold?.id) });
+    return json({ strongholds: await listPublicDirectory(env, rootStronghold?.id) });
   }
 
   // URL short-name resolution, e.g. /a/<slug> - "a" is this instance's
@@ -717,7 +854,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
   const resolveMatch = match("/api/resolve/:server/:slug", path);
   if (resolveMatch && method === "GET") {
     if (resolveMatch.server !== "a") return apiError(404, "NOT_FOUND");
-    if (fixedStronghold && resolveMatch.slug !== fixedStronghold.slug) return apiError(404, "NOT_FOUND");
+    if (rootStronghold && resolveMatch.slug !== rootStronghold.slug) return apiError(404, "NOT_FOUND");
     const row = await env.DB.prepare("SELECT stronghold_id FROM stronghold_slug_index WHERE slug = ?")
       .bind(resolveMatch.slug!)
       .first<{ stronghold_id: string }>();
@@ -726,6 +863,8 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
   }
 
   if (method === "POST" && path === "/api/register") {
+    const rejected = localAuthenticationRejection(env);
+    if (rejected) return rejected;
     const body = await readJsonBody(request);
     if (!body) return apiError(413, "PAYLOAD_INVALID");
 
@@ -817,7 +956,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
 
     let token: string;
     try {
-      token = await issueSessionToken(actor, serverRole, env);
+      token = await issueSessionToken(actor, serverRole, "local", env);
     } catch (err) {
       // Signing failed after the user row was committed - roll the registration
       // back (and release any consumed invite code) so a retry can succeed
@@ -829,10 +968,12 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
       throw err;
     }
     const user = toPublicUser({ localpart: username, server_role: serverRole, email, email_verified: 0, avatar: null, cover: null, bio: null }, actor);
-    return json({ token, user });
+    return json({ token, user, auth_source: "local" });
   }
 
   if (method === "POST" && path === "/api/login") {
+    const rejected = localAuthenticationRejection(env);
+    if (rejected) return rejected;
     const body = await readJsonBody(request);
     if (!body) return apiError(413, "PAYLOAD_INVALID");
     const username = normalizeUsername(String(body.username ?? ""));
@@ -879,12 +1020,14 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
       return json({ totp_required: true, pending: await signToken(pending, env.DEV_TOKEN_SECRET) });
     }
 
-    const token = await issueSessionToken(actor, user.server_role, env);
+    const token = await issueSessionToken(actor, user.server_role, "local", env);
     await touchLastActive(env, username);
-    return json({ token, user: toPublicUser(user, actor) });
+    return json({ token, user: toPublicUser(user, actor), auth_source: "local" });
   }
 
   if (method === "POST" && path === "/api/login/totp") {
+    const rejected = localAuthenticationRejection(env);
+    if (rejected) return rejected;
     const body = await readJsonBody(request);
     if (!body) return apiError(413, "PAYLOAD_INVALID");
     const pendingToken = typeof body.pending === "string" ? body.pending : "";
@@ -936,9 +1079,9 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     }
 
     await recordTotpSuccess(env, localpart);
-    const token = await issueSessionToken(claims.actor, user.server_role, env);
+    const token = await issueSessionToken(claims.actor, user.server_role, "local", env);
     await touchLastActive(env, localpart);
-    return json({ token, user: toPublicUser(user, claims.actor) });
+    return json({ token, user: toPublicUser(user, claims.actor), auth_source: "local" });
   }
 
   // ---- account: display name ---------------------------------------------------------
@@ -1318,6 +1461,8 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
   // ---- passkey login (no session - this IS the login path) --------------------------
 
   if (method === "POST" && path === "/api/login/passkey/options") {
+    const rejected = localAuthenticationRejection(env);
+    if (rejected) return rejected;
     const options = await generateAuthenticationOptions({ rpID: webauthnRpId(env), allowCredentials: [] });
     const challengeClaims: WebauthnAuthChallengeClaims = {
       v: 1, typ: "webauthn_auth", challenge: options.challenge, exp: nowS() + WEBAUTHN_CHALLENGE_TTL_S, jti: newJti(),
@@ -1326,6 +1471,8 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
   }
 
   if (method === "POST" && path === "/api/login/passkey") {
+    const rejected = localAuthenticationRejection(env);
+    if (rejected) return rejected;
     const body = await readJsonBody(request);
     if (!body) return apiError(413, "PAYLOAD_INVALID");
     const challengeToken = typeof body.challenge_token === "string" ? body.challenge_token : "";
@@ -1396,9 +1543,9 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
       .run();
 
     const actor = `@${row.localpart}:${instanceDomain(env)}`;
-    const token = await issueSessionToken(actor, row.server_role, env);
+    const token = await issueSessionToken(actor, row.server_role, "local", env);
     await touchLastActive(env, row.localpart);
-    return json({ token, user: toPublicUser(row, actor) });
+    return json({ token, user: toPublicUser(row, actor), auth_source: "local" });
   }
 
   // ---- instance admin --------------------------------------------------------------
@@ -1408,7 +1555,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
   if (method === "GET" && path === "/api/admin/instance/config") {
     const gate = await requireServerRole(request, env, "admin");
     if (gate instanceof Response) return gate;
-    return json({ ...getInstanceConfig(env), source: "env" });
+    return json({ ...adminConfigSnapshot(env), source: "env" });
   }
 
   if (method === "PATCH" && path === "/api/admin/instance/config") {
@@ -2107,7 +2254,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
   // without inventing a slug.
 
   if (method === "POST" && path === "/api/strongholds") {
-    if (fixedStronghold) return apiError(403, "STRONGHOLD_FIXED");
+    if (rootStronghold) return apiError(403, "INSTANCE_SINGLE_STRONGHOLD");
     const session = await requireSession(request, env);
     if (session instanceof Response) return session;
     const actor = session.actor;
@@ -2216,7 +2363,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
   // MUST NOT be able to hijack another stronghold's slug or grief their own).
   const slugMatch = match("/api/admin/strongholds/:id/slug", path);
   if (slugMatch && method === "PATCH") {
-    if (fixedStronghold && slugMatch.id === fixedStronghold.id) return apiError(403, "STRONGHOLD_FIXED");
+    if (rootStronghold && slugMatch.id === rootStronghold.id) return apiError(403, "INSTANCE_SINGLE_STRONGHOLD");
     const gate = await requireServerRole(request, env, "admin");
     if (gate instanceof Response) return gate;
     const body = await readJsonBody(request);
@@ -2384,8 +2531,8 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
       : await env.DB.prepare("SELECT DISTINCT stronghold_id FROM stronghold_member_index WHERE actor = ? ORDER BY stronghold_id")
         .bind(actor)
         .all<{ stronghold_id: string }>();
-    const strongholdIds = fixedStronghold
-      ? [fixedStronghold.id]
+    const strongholdIds = rootStronghold
+      ? [rootStronghold.id]
       : [...new Set(results.map((row) => row.stronghold_id))];
     const nodes = await Promise.all(
       strongholdIds.map(async (strongholdId) => {
@@ -2554,7 +2701,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
   // override. A server admin does not inherit this irreversible operation.
   m = match("/api/stronghold/:id", path);
   if (m && method === "DELETE") {
-    if (fixedStronghold) return apiError(403, "STRONGHOLD_FIXED");
+    if (rootStronghold) return apiError(403, "INSTANCE_SINGLE_STRONGHOLD");
     const session = await requireSession(request, env);
     if (session instanceof Response) return session;
     const strongholdId = m.id!;
@@ -2723,7 +2870,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
 
   m = match("/api/stronghold/:id/transfer", path);
   if (m && method === "POST") {
-    if (fixedStronghold) return apiError(403, "STRONGHOLD_FIXED");
+    if (rootStronghold) return apiError(403, "INSTANCE_SINGLE_STRONGHOLD");
     // m0-protocol §7.10: the one permission gate the server_owner/server_admin
     // overlay does NOT extend to - only the real stronghold owner or the actual
     // server_owner (not server_admin) may transfer ownership.
@@ -3812,9 +3959,10 @@ function paginateMembers(members: MemberRow[], afterCursor: string | null): { pa
   return { page, next_cursor: hasMore && last ? last.actor : null };
 }
 
-async function issueSessionToken(actor: string, serverRole: ServerRole, env: Env): Promise<string> {
+async function issueSessionToken(actor: string, serverRole: ServerRole, authSource: AuthSource, env: Env): Promise<string> {
   const claims: SessionTokenClaims = {
-    v: 1, typ: "session", actor, server_role: serverRole, exp: nowS() + SESSION_TOKEN_TTL_S, jti: newJti(),
+    v: 1, typ: "session", actor, server_role: serverRole, auth_source: authSource,
+    exp: nowS() + SESSION_TOKEN_TTL_S, jti: newJti(),
   };
   return signToken(claims, env.DEV_TOKEN_SECRET);
 }

@@ -9,7 +9,6 @@ import type { IconName } from './icons/paths'
 
 const { activeView, setView } = useShellView()
 const { config: instanceConfig } = useInstanceConfig()
-const fixedStronghold = computed(() => instanceConfig.value?.fixed_stronghold ?? null)
 const logoSrc = computed(() => instanceConfig.value?.logo_url || (instanceConfig.value?.art_assets_enabled !== false ? '/favicon.svg' : null))
 
 const tabs: { view: ShellView; label: string; icon: IconName }[] = [
@@ -21,7 +20,7 @@ const tabs: { view: ShellView; label: string; icon: IconName }[] = [
 
 <template>
   <nav class="mobile-nav">
-    <a v-if="!fixedStronghold" class="mobile-nav__item mobile-nav__item--home" href="/" aria-label="返回 OMEW 首页" @click.prevent="navigateHome">
+    <a class="mobile-nav__item mobile-nav__item--home" href="/" aria-label="返回 OMEW 首页" @click.prevent="navigateHome">
       <img v-if="logoSrc" :src="logoSrc" alt="" aria-hidden="true" />
       <span class="mobile-nav__label">首页</span>
     </a>

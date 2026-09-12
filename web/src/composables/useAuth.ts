@@ -58,9 +58,30 @@ async function loginPasskey(response: AuthenticationResponseJSON, challengeToken
   setSession(session)
 }
 
-async function loginWithStarDust(bridgeToken: string) {
-  const session = await api.exchangeStarDustSession(bridgeToken)
+const ssoCompletionError = ref('')
+let ssoCompletionInFlight: Promise<void> | null = null
+
+async function completeOidcLogin(code: string) {
+  const session = await api.completeOidcLogin(code)
   setSession(session)
+}
+
+async function completeOidcLoginFromLocation() {
+  if (typeof window === 'undefined' || ssoCompletionInFlight) return ssoCompletionInFlight
+  const params = new URLSearchParams(window.location.hash.replace(/^#/, ''))
+  const code = params.get('sso_complete')
+  if (!code || params.getAll('sso_complete').length !== 1 || code.length > 512) return
+
+  history.replaceState(null, '', `${window.location.pathname}${window.location.search}`)
+  ssoCompletionError.value = ''
+  ssoCompletionInFlight = completeOidcLogin(code)
+    .catch(() => {
+      ssoCompletionError.value = 'SSO 登录未完成，请重试。'
+    })
+    .finally(() => {
+      ssoCompletionInFlight = null
+    })
+  return ssoCompletionInFlight
 }
 
 // register() intentionally does NOT commit the session by itself — the
@@ -96,6 +117,7 @@ export function useAuth() {
     user,
     isAuthenticated: computed(() => !!token.value),
     sessionExpired,
+    ssoCompletionError,
     isAdmin: computed(() => !!user.value?.is_admin),
     // server_role owner is unique/non-transferable (m0-protocol §7.10) - gates
     // the server-member-appointment section, distinct from isAdmin (owner|admin).
@@ -103,7 +125,7 @@ export function useAuth() {
     login,
     loginTotp,
     loginPasskey,
-    loginWithStarDust,
+    completeOidcLoginFromLocation,
     register,
     setSession,
     updateUser,

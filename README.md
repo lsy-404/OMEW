@@ -12,6 +12,12 @@ Open-source, self-hostable community platform built around strongholds, realtime
 
 为了让服务器领主可以在 OMEW 内更新实例政策，Overture 会要求一个由部署者创建的长期 Cloudflare Account API Token，并作为 Worker Secret 保存。该令牌需要账户级 Workers Scripts 写权限，也能影响同账户中的其他 Worker，因此推荐为 OMEW 使用专用 Cloudflare 账户。
 
+### 登录与运行模式
+
+OMEW 使用标准 OIDC Authorization Code + PKCE 接入统一登录。Worker 环境变量 `SSO_MODE` 可设为 `disabled`（关闭，默认）、`optional`（允许 SSO 与本地登录）或 `required`（仅允许 SSO）；启用时还需配置 `SSO_ISSUER`、`SSO_CLIENT_ID`，并把 `SSO_CLIENT_SECRET` 作为 Worker Secret 写入。OMEW 通过 Issuer 的 discovery 文档发现授权端点和签名密钥，不绑定任何特定站点。
+
+若只运行一个据点，可将 `INSTANCE_MODE=single` 与 `ROOT_STRONGHOLD=<据点短名>` 一起设置。该模式会把指定据点作为 `/` 的主内容，隐藏首页和据点导航栏，并拒绝其他据点的访问、创建、删除与转让；`INSTANCE_MODE=multi` 保留普通多据点首页。
+
 ## 文档 / Docs
 
 - [项目书 v0.2](docs/proposal-v0.2.md) —— 设计文档(架构、数据模型、联邦、成本)

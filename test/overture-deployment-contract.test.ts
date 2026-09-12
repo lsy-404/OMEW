@@ -16,6 +16,7 @@ function deploymentContext(options: {
   wranglerLedger?: string[] | null;
   established?: boolean;
   fullRebuild?: boolean;
+  inputs?: Record<string, string | boolean>;
 }) {
   const overtureLedger = new Set(options.overtureLedger ?? []);
   const appliedSql: string[] = [];
@@ -45,7 +46,13 @@ function deploymentContext(options: {
     return queryResult();
   });
   const ctx = {
-    ctx: { workerName: "openmew", domain: options.domain ?? "omew.example.test", mode: options.mode, fullRebuild: options.fullRebuild },
+    ctx: {
+      workerName: "openmew",
+      domain: options.domain ?? "omew.example.test",
+      mode: options.mode,
+      fullRebuild: options.fullRebuild,
+      inputs: options.inputs ?? {},
+    },
     step: vi.fn(),
     d1: { provision: vi.fn(), query },
     r2: { provision: vi.fn() },
@@ -109,7 +116,35 @@ describe("Overture deployment recipe", () => {
     expect(state.ctx.domains.attach).not.toHaveBeenCalled();
     expect(state.ctx.result).toHaveBeenCalledWith({
       url: "",
-      notes: ["Worker openmew deployed."],
+      notes: [
+        "Worker openmew deployed.",
+        "Multi-stronghold mode is enabled.",
+        "SSO is disabled; local authentication remains enabled.",
+      ],
     });
+  });
+
+  it("passes single mode and OIDC settings into the Worker and protects the client secret", async () => {
+    const state = deploymentContext({
+      mode: "fresh",
+      inputs: {
+        instance_mode: "single",
+        root_stronghold: "medium5",
+        sso_mode: "optional",
+        sso_issuer: "https://identity.example",
+        sso_client_id: "omew",
+        sso_client_secret: "client-secret",
+        sso_provider_name: "Identity",
+      },
+    });
+    await deploy(state.ctx);
+    expect(state.ctx.worker.uploadVersion).toHaveBeenCalledWith({ assets: "asset-handle" });
+    expect(state.putSecret).toHaveBeenCalledWith("SSO_CLIENT_SECRET", "client-secret");
+  });
+
+  it("rejects an incomplete enabled OIDC configuration before provisioning", async () => {
+    const state = deploymentContext({ mode: "fresh", inputs: { sso_mode: "required" } });
+    await expect(deploy(state.ctx)).rejects.toThrow("OIDC configuration is incomplete");
+    expect(state.ctx.d1.provision).not.toHaveBeenCalled();
   });
 });

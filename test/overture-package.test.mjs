@@ -66,7 +66,26 @@ try {
     { name: "INSTANCE_DOMAIN", value: "${input:domain}" },
     { name: "R2_BUCKET_NAME", value: "${resource:media}" },
     { name: "CF_WORKER_NAME", value: "${worker}" },
+    { name: "INSTANCE_MODE", value: "${input:instance_mode}" },
+    { name: "ROOT_STRONGHOLD", value: "${input:root_stronghold}" },
+    { name: "SSO_MODE", value: "${input:sso_mode}" },
+    { name: "SSO_ISSUER", value: "${input:sso_issuer}" },
+    { name: "SSO_CLIENT_ID", value: "${input:sso_client_id}" },
+    { name: "SSO_PROVIDER_NAME", value: "${input:sso_provider_name}" },
   ]);
+  assert.deepEqual(manifest.inputs.map((input) => input.id), [
+    "domain",
+    "instance_mode",
+    "root_stronghold",
+    "sso_mode",
+    "sso_issuer",
+    "sso_client_id",
+    "sso_client_secret",
+    "sso_provider_name",
+  ]);
+  assert.equal(manifest.inputs.find((input) => input.id === "root_stronghold").visibleWhen.input, "instance_mode");
+  assert.equal(manifest.inputs.find((input) => input.id === "sso_client_secret").kind, "password");
+  assert.equal(manifest.worker.vars.some((variable) => variable.name === "SSO_CLIENT_SECRET"), false);
   assert.deepEqual(manifest.hostSecrets, [
     { name: "CF_ACCOUNT_ID", source: "accountId", requirement: "required", reason: manifest.hostSecrets[0].reason },
     {

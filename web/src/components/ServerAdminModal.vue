@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { api, ApiRequestError } from '../api'
 import type {
   AdminInstanceConfig,
+  AdminInstanceConfigPatch,
   AdminUserEntry,
   BanEntry,
   DirectoryEntry,
@@ -11,12 +12,14 @@ import type {
   FeatureRestrictionMode,
   FeatureRestrictions,
   InviteCode,
+  InstanceMode,
   MemberGroupRef,
   RootRequirement,
   ServerGroup,
   ServerRole,
   StrongholdApplication,
   StrongholdCreationPolicy,
+  SsoMode,
 } from '../api/types'
 import { useAuth } from '../composables/useAuth'
 import { useInstanceConfig } from '../composables/useInstanceConfig'
@@ -40,6 +43,10 @@ const { config: instanceConfig } = useInstanceConfig()
 const ROOT_REQUIREMENT_LABEL: Record<RootRequirement, string> = { email: '邮箱', phone: '手机号', code: '邀请码' }
 const CREATION_POLICY_LABEL: Record<StrongholdCreationPolicy, string> = { open: '开放', restricted: '限制', application: '申请制' }
 const CREATION_POLICY_OPTIONS = (Object.entries(CREATION_POLICY_LABEL) as Array<[StrongholdCreationPolicy, string]>).map(([Value, Text]) => ({ Value, Text }))
+const INSTANCE_MODE_LABEL: Record<InstanceMode, string> = { multi: '多据点', single: '单据点' }
+const INSTANCE_MODE_OPTIONS = (Object.entries(INSTANCE_MODE_LABEL) as Array<[InstanceMode, string]>).map(([Value, Text]) => ({ Value, Text }))
+const SSO_MODE_LABEL: Record<SsoMode, string> = { disabled: '关闭', optional: '允许 SSO 与本地登录', required: '仅允许 SSO' }
+const SSO_MODE_OPTIONS = (Object.entries(SSO_MODE_LABEL) as Array<[SsoMode, string]>).map(([Value, Text]) => ({ Value, Text }))
 
 const TAB_OPTIONS: { Text: string; value: 'overview' | 'members' | 'bans' | 'groups' }[] = [
   { Text: '概览', value: 'overview' },
@@ -62,6 +69,8 @@ const policySaving = ref(false)
 const policySaveError = ref('')
 const policySaveOk = ref('')
 const policyForm = reactive({
+  instanceMode: 'multi' as InstanceMode,
+  rootStronghold: '',
   allowRoot: true,
   rootRequirements: [] as RootRequirement[],
   trustedServers: '*',
@@ -71,9 +80,16 @@ const policyForm = reactive({
   allowGuestBrowsing: true,
   maxFileBytes: 10_485_760,
   storageQuotaBytes: 209_715_200,
+  ssoMode: 'disabled' as SsoMode,
+  ssoIssuer: '',
+  ssoClientId: '',
+  ssoProviderName: '',
+  ssoClientSecret: '',
 })
 
 function setPolicyForm(value: AdminInstanceConfig) {
+  policyForm.instanceMode = value.instance_mode
+  policyForm.rootStronghold = value.root_stronghold ?? ''
   policyForm.allowRoot = value.allow_root
   policyForm.rootRequirements = [...value.root_requirements]
   policyForm.trustedServers = value.trusted_identity_servers.join('\n')
@@ -83,6 +99,11 @@ function setPolicyForm(value: AdminInstanceConfig) {
   policyForm.allowGuestBrowsing = value.allow_guest_browsing
   policyForm.maxFileBytes = value.max_file_bytes
   policyForm.storageQuotaBytes = value.user_storage_quota_bytes
+  policyForm.ssoMode = value.sso_mode
+  policyForm.ssoIssuer = value.sso_issuer
+  policyForm.ssoClientId = value.sso_client_id
+  policyForm.ssoProviderName = value.sso_provider_name
+  policyForm.ssoClientSecret = ''
 }
 
 function policyLines(value: string): string[] {
@@ -122,9 +143,29 @@ async function savePolicy() {
     policySaveError.value = '用户存储配额必须是不小于单文件上限的正整数'
     return
   }
+  if (policyForm.instanceMode === 'single' && !/^[a-z0-9][a-z0-9-]{0,31}$/.test(policyForm.rootStronghold)) {
+    policySaveError.value = '单据点模式必须填写有效的主据点短名'
+    return
+  }
+  if (policyForm.ssoMode !== 'disabled') {
+    try {
+      const issuer = new URL(policyForm.ssoIssuer)
+      const localDevelopment = issuer.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(issuer.hostname)
+      if ((!['https:', 'http:'].includes(issuer.protocol) || (issuer.protocol === 'http:' && !localDevelopment)) || issuer.username || issuer.password || issuer.search || issuer.hash) throw new Error()
+    } catch {
+      policySaveError.value = 'SSO Issuer 必须是 HTTPS 地址（本地开发可使用 localhost）'
+      return
+    }
+    if (!policyForm.ssoClientId.trim() || (!config.value?.sso_client_secret_configured && !policyForm.ssoClientSecret)) {
+      policySaveError.value = '启用 SSO 时必须填写 Client ID 与 Client Secret'
+      return
+    }
+  }
   policySaving.value = true
   try {
-    const updated = await api.patchAdminConfig(auth.token.value, {
+    const patch: AdminInstanceConfigPatch = {
+      instance_mode: policyForm.instanceMode,
+      root_stronghold: policyForm.rootStronghold,
       allow_root: policyForm.allowRoot,
       root_requirements: [...policyForm.rootRequirements],
       trusted_identity_servers: policyLines(policyForm.trustedServers),
@@ -134,7 +175,13 @@ async function savePolicy() {
       allow_guest_browsing: policyForm.allowGuestBrowsing,
       max_file_bytes: policyForm.maxFileBytes,
       user_storage_quota_bytes: policyForm.storageQuotaBytes,
-    })
+      sso_mode: policyForm.ssoMode,
+      sso_issuer: policyForm.ssoIssuer,
+      sso_client_id: policyForm.ssoClientId,
+      sso_provider_name: policyForm.ssoProviderName,
+    }
+    if (policyForm.ssoClientSecret) patch.sso_client_secret = policyForm.ssoClientSecret
+    const updated = await api.patchAdminConfig(auth.token.value, patch)
     config.value = updated
     setPolicyForm(updated)
     policySaveOk.value = '配置已提交到 Cloudflare，新的请求会在配置版本接管后使用这些设置。'
@@ -748,6 +795,51 @@ watch(
                       <WinToggleSwitch v-model="policyForm.allowGuestBrowsing">允许游客浏览公开据点</WinToggleSwitch>
                     </div>
 
+                    <div class="field">
+                      <span class="field__label">运行模式</span>
+                      <WinComboBox
+                        :ItemsSource="INSTANCE_MODE_OPTIONS"
+                        SelectedValuePath="Value"
+                        v-model:SelectedValue="policyForm.instanceMode"
+                      />
+                    </div>
+                    <div v-if="policyForm.instanceMode === 'single'" class="field">
+                      <label class="field__label" for="policy-root-stronghold">主据点短名</label>
+                      <input id="policy-root-stronghold" v-model.trim="policyForm.rootStronghold" maxlength="32" pattern="[a-z0-9][a-z0-9-]{0,31}" />
+                      <p class="field__hint">单据点模式下主据点直接挂在 /，首页、据点切换栏和创建入口都会隐藏。</p>
+                    </div>
+
+                    <fieldset class="policy-form__fieldset">
+                      <legend class="field__label">统一登录</legend>
+                      <div class="field">
+                        <span class="field__label">SSO 模式</span>
+                        <WinComboBox
+                          :ItemsSource="SSO_MODE_OPTIONS"
+                          SelectedValuePath="Value"
+                          v-model:SelectedValue="policyForm.ssoMode"
+                        />
+                      </div>
+                      <template v-if="policyForm.ssoMode !== 'disabled'">
+                        <div class="field">
+                          <label class="field__label" for="policy-sso-issuer">OIDC Issuer</label>
+                          <input id="policy-sso-issuer" v-model.trim="policyForm.ssoIssuer" type="url" placeholder="https://identity.example" />
+                        </div>
+                        <div class="field">
+                          <label class="field__label" for="policy-sso-client-id">Client ID</label>
+                          <input id="policy-sso-client-id" v-model.trim="policyForm.ssoClientId" autocomplete="off" />
+                        </div>
+                        <div class="field">
+                          <label class="field__label" for="policy-sso-provider-name">登录按钮名称</label>
+                          <input id="policy-sso-provider-name" v-model.trim="policyForm.ssoProviderName" maxlength="64" placeholder="SSO" />
+                        </div>
+                        <div class="field">
+                          <label class="field__label" for="policy-sso-client-secret">Client Secret</label>
+                          <input id="policy-sso-client-secret" v-model="policyForm.ssoClientSecret" type="password" autocomplete="new-password" placeholder="留空表示保持现有密钥" />
+                          <p class="field__hint">当前密钥：{{ config?.sso_client_secret_configured ? '已配置' : '未配置' }}。密钥只写入 Worker Secret。</p>
+                        </div>
+                      </template>
+                    </fieldset>
+
                     <fieldset class="policy-form__fieldset">
                       <legend class="field__label">注册门槛</legend>
                       <label v-for="(label, requirement) in ROOT_REQUIREMENT_LABEL" :key="requirement" class="policy-form__check">
@@ -805,6 +897,10 @@ watch(
                   </WinInfoBar>
                 </template>
                 <dl v-if="config && !auth.isServerOwner.value" class="policy-summary">
+                  <dt>运行模式</dt>
+                  <dd>{{ INSTANCE_MODE_LABEL[config.instance_mode] }}<template v-if="config.instance_mode === 'single'">（{{ config.root_stronghold || '未设置主据点' }}）</template></dd>
+                  <dt>SSO 模式</dt>
+                  <dd>{{ SSO_MODE_LABEL[config.sso_mode] }}<template v-if="config.sso_mode !== 'disabled'">（{{ config.sso_client_secret_configured ? '已配置' : '未配置' }}）</template></dd>
                   <dt>根节点（开放注册）</dt>
                   <dd>{{ config.allow_root ? '已开启' : '已关闭' }}</dd>
                   <dt>注册门槛</dt>

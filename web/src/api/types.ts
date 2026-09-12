@@ -1,7 +1,10 @@
 export type RootRequirement = 'email' | 'phone' | 'code'
 export type StrongholdCreationPolicy = 'open' | 'restricted' | 'application'
 
-export interface FixedStronghold {
+export type InstanceMode = 'multi' | 'single'
+export type SsoMode = 'disabled' | 'optional' | 'required'
+
+export interface RootStronghold {
   id: string
   name: string
   slug: string
@@ -9,7 +12,7 @@ export interface FixedStronghold {
 
 // server-level role (m0-protocol §7.10, migration 0008) - distinct from a
 // per-stronghold StrongholdRole. 'owner' is the unique, non-transferable
-// bootstrap account; 'admin' is appointed by the owner (task 035).
+// bootstrap account; 'admin' is appointed by the owner.
 export type ServerRole = 'owner' | 'admin' | 'user'
 
 // /api/instance/config (public, unauthenticated) - a deliberately thin
@@ -18,11 +21,15 @@ export type ServerRole = 'owner' | 'admin' | 'user'
 // stronghold_creation here vs. stronghold_creation_policy on admin - the
 // public route renames it on the way out, creators/peers stay admin-only).
 export interface InstanceConfig {
+  instance_mode: InstanceMode
+  root_stronghold: RootStronghold | null
   allow_root: boolean
   root_requirements: RootRequirement[]
   stronghold_creation: StrongholdCreationPolicy
   allow_guest_browsing: boolean
-  fixed_stronghold: FixedStronghold | null
+  sso_mode: SsoMode
+  sso_enabled: boolean
+  sso_provider_name: string
   logo_url: string | null
   emotes_enabled: boolean
   builtin_emotes_enabled: boolean
@@ -34,6 +41,8 @@ export interface InstanceConfig {
 // row (server/src/types.ts) field-for-field; deliberately not `extends
 // InstanceConfig` since the two responses don't actually share a shape.
 export interface AdminInstanceConfig {
+  instance_mode: InstanceMode
+  root_stronghold: string | null
   allow_root: boolean
   root_requirements: RootRequirement[]
   trusted_identity_servers: string[]
@@ -43,6 +52,15 @@ export interface AdminInstanceConfig {
   stronghold_creation_policy: StrongholdCreationPolicy
   stronghold_creators: string[]
   allow_guest_browsing: boolean
+  sso_mode: SsoMode
+  sso_issuer: string
+  sso_client_id: string
+  sso_provider_name: string
+  sso_client_secret_configured: boolean
+}
+
+export interface AdminInstanceConfigPatch extends Partial<AdminInstanceConfig> {
+  sso_client_secret?: string
 }
 
 export interface AuthUser {
@@ -68,6 +86,7 @@ export interface AuthUser {
 export interface AuthResponse {
   token: string
   user: AuthUser
+  auth_source?: 'local' | 'sso'
 }
 
 export interface UserProfile {
@@ -157,7 +176,7 @@ export interface FeatureRestrictions {
   posts: FeatureRestrictionState
 }
 
-// task 048: a member's server-level group badge, as returned by the batch
+// A member's server-level group badge, as returned by the batch
 // read-only lookup (GET /api/server-groups/members) - deliberately thin,
 // just enough to render a badge. Read-only on the stronghold side; group
 // definition and assignment both live at the server level now.
@@ -189,9 +208,9 @@ export interface StrongholdMember {
 // tri-state permission value used by server groups: -1 deny / 0 inherit / 1 allow.
 export type GroupPermValue = -1 | 0 | 1
 
-// task 048: a server-level user group (m0-protocol §7.10a, server's
-// ServerGroup / D1 server_groups) - replaces task 037's stronghold-local
-// groups. position is ascending synthesis order and doubles as display order.
+// A server-level user group (m0-protocol §7.10a, server's ServerGroup / D1
+// server_groups) - replaces stronghold-local groups.
+// Position is ascending synthesis order and doubles as display order.
 export interface ServerGroup {
   id: string
   name: string
@@ -303,7 +322,7 @@ export interface StrongholdSummary {
   rooms: RoomSummary[]
 }
 
-// public directory entry (task 034, GET /api/directory) - unauthenticated
+// Public directory entry (GET /api/directory) - unauthenticated
 // discovery listing, distinct from StrongholdSummary which carries rooms and
 // is only ever returned to an authenticated member.
 export interface DirectoryEntry {

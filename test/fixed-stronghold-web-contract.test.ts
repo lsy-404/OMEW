@@ -8,16 +8,17 @@ import nodeRail from "../web/src/components/NodeRail.vue?raw";
 import postModal from "../web/src/components/PostModal.vue?raw";
 import useEmotes from "../web/src/composables/useEmotes.ts?raw";
 
-describe("fixed stronghold web contract", () => {
-  it("routes a configured fixed instance into its stronghold instead of rendering the landing page", () => {
-    expect(app).toContain("fixed_stronghold");
-    expect(app).toContain("installRoute(fixed.id, fixed.slug)");
-    expect(app).toContain("!instanceConfigLoading.value && !fixedStronghold.value");
+describe("single stronghold web contract", () => {
+  it("does not render the landing page in single mode", () => {
+    expect(app).toContain("instanceConfig.value?.instance_mode === 'single'");
+    expect(app).toContain("!singleMode.value");
+    expect(app).toContain("showInstanceLoading");
   });
 
-  it("hides discovery and creation controls in fixed mode", () => {
-    expect(nodeRail).toContain("auth.isAuthenticated.value && !fixedStronghold");
-    expect(nodeRail).toContain("fixedStronghold ? `/a/${encodeURIComponent(fixedStronghold.slug)}` : '/'");
+  it("hides the global navigation rails in single mode", () => {
+    expect(app).toContain("<NodeRail v-if=\"!singleMode\" />");
+    expect(app).toContain("<MobileNavBar v-if=\"!singleMode\" />");
+    expect(nodeRail).toContain("发现据点");
   });
 
   it("uses the configured logo and gates optional interaction features", () => {

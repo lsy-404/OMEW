@@ -28,8 +28,8 @@ const isHome = ref(location.pathname === '/')
 const routeInstalled = ref(!isHome.value)
 let routeController: ReturnType<typeof useRoute> | null = routeInstalled.value ? useRoute() : null
 // ServerAdminModal and StrongholdAdminModal are two independent
-// PostModal-style floating overlays with separate entry points (task 039
-// split, task 048 modal-ized) - the shell underneath keeps rendering while
+// PostModal-style floating overlays with separate entry points - the shell
+// underneath keeps rendering while
 // either is open, they never share state beyond these two booleans.
 const serverAdminOpen = ref(false)
 const strongholdAdminOpen = ref(false)
@@ -45,29 +45,16 @@ useDocumentTitle(isHome)
 // yet, same fallback as before) - otherwise the four-column shell renders
 // directly in its read-only guest state (useStronghold's isGuestMode).
 const showAuthGate = computed(() => !auth.isAuthenticated.value && !instanceConfig.value?.allow_guest_browsing)
-const fixedStronghold = computed(() => instanceConfig.value?.fixed_stronghold ?? null)
+const singleMode = computed(() => instanceConfig.value?.instance_mode === 'single')
 const artAssetsEnabled = computed(() => instanceConfig.value?.art_assets_enabled !== false)
 const logoSrc = computed(() => instanceConfig.value?.logo_url || (artAssetsEnabled.value ? '/favicon.svg' : null))
-const showLanding = computed(() => isHome.value && !instanceConfigLoading.value && !fixedStronghold.value)
-const showFixedLoading = computed(() => isHome.value && (instanceConfigLoading.value || Boolean(fixedStronghold.value)))
-const STAR_DUST_ORIGIN = 'https://stardustinfinity.top'
-let lastStarDustBridgeToken: string | null = null
-
-async function handleStarDustSession(event: MessageEvent) {
-  if (event.origin !== STAR_DUST_ORIGIN || event.source !== window.parent) return
-  if (event.data?.type !== 'star-dust-session' || typeof event.data.token !== 'string') return
-  if (event.data.token === lastStarDustBridgeToken && auth.isAuthenticated.value) return
-  lastStarDustBridgeToken = event.data.token
-  try {
-    await auth.loginWithStarDust(event.data.token)
-  } catch {
-    lastStarDustBridgeToken = null
-  }
-}
-
-function announceEmbeddedReady() {
-  if (window.parent !== window) window.parent.postMessage({ type: 'omew-ready' }, STAR_DUST_ORIGIN)
-}
+const showLanding = computed(() => isHome.value && !instanceConfigLoading.value && !singleMode.value)
+const showInstanceLoading = computed(() =>
+  isHome.value && (instanceConfigLoading.value || (singleMode.value && strongholdsLoading.value && !hasStrongholds.value)),
+)
+const showInstanceConfigurationError = computed(() =>
+  isHome.value && !instanceConfigLoading.value && singleMode.value && !instanceConfig.value?.root_stronghold,
+)
 
 function syncFavicon(logoUrl: string | null) {
   const link = document.querySelector<HTMLLinkElement>('link[rel="icon"]')
@@ -93,10 +80,6 @@ function installRoute(strongholdId?: string, strongholdSlug?: string) {
 }
 
 function syncHomeFromAddress() {
-  if (fixedStronghold.value && location.pathname === '/') {
-    installRoute(fixedStronghold.value.id, fixedStronghold.value.slug)
-    return
-  }
   isHome.value = location.pathname === '/'
 }
 
@@ -114,14 +97,6 @@ watch(auth.isAuthenticated, (authenticated) => {
 })
 
 watch(
-  fixedStronghold,
-  (fixed) => {
-    if (fixed && location.pathname === '/') installRoute(fixed.id, fixed.slug)
-  },
-  { immediate: true },
-)
-
-watch(
   logoSrc,
   (logoUrl) => syncFavicon(logoUrl),
   { immediate: true },
@@ -129,12 +104,10 @@ watch(
 
 onMounted(() => {
   window.addEventListener('popstate', syncHomeFromAddress)
-  window.addEventListener('message', handleStarDustSession)
-  announceEmbeddedReady()
+  void auth.completeOidcLoginFromLocation()
 })
 onBeforeUnmount(() => {
   window.removeEventListener('popstate', syncHomeFromAddress)
-  window.removeEventListener('message', handleStarDustSession)
 })
 </script>
 
@@ -150,9 +123,13 @@ onBeforeUnmount(() => {
       @browse="installRoute"
     />
 
-    <div v-else-if="showFixedLoading" class="shell__loading" role="status" aria-live="polite" aria-busy="true">
+    <div v-else-if="showInstanceLoading" class="shell__loading" role="status" aria-live="polite" aria-busy="true">
       <span class="shell__loading-spinner" aria-hidden="true" />
-      <span>正在进入 {{ fixedStronghold?.name ?? 'OMEW' }}…</span>
+      <span>{{ singleMode ? '正在进入主据点…' : '正在加载 OMEW…' }}</span>
+    </div>
+
+    <div v-else-if="showInstanceConfigurationError" class="shell__loading" role="alert">
+      <span>单据点模式尚未配置有效的主据点，请联系管理员。</span>
     </div>
 
     <AuthGate v-else-if="showAuthGate" />
@@ -171,8 +148,8 @@ onBeforeUnmount(() => {
     <StrongholdOnboarding v-else-if="auth.isAuthenticated.value && !hasStrongholds" />
 
     <template v-else>
-      <div class="shell__body" :data-view="activeView">
-        <NodeRail />
+      <div class="shell__body" :class="{ 'shell__body--single': singleMode }" :data-view="activeView">
+        <NodeRail v-if="!singleMode" />
         <LeftColumn />
         <ColumnResizer :var-name="'--left-width'" :storage-key="LEFT_WIDTH_KEY" :default-percent="LEFT_WIDTH_DEFAULT" />
         <MiddleColumn />
@@ -184,7 +161,7 @@ onBeforeUnmount(() => {
         />
         <RightColumn @open-server-admin="serverAdminOpen = true" @open-panel="openStrongholdAdmin" />
       </div>
-      <MobileNavBar />
+      <MobileNavBar v-if="!singleMode" />
       <PostModal />
     </template>
 
@@ -242,6 +219,10 @@ onBeforeUnmount(() => {
   .shell__body {
     flex-direction: column;
     padding-bottom: calc(var(--navbar-height) + env(safe-area-inset-bottom));
+  }
+
+  .shell__body--single {
+    padding-bottom: 0;
   }
 }
 </style>

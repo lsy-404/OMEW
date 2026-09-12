@@ -11,7 +11,6 @@ import AppIcon from './icons/AppIcon.vue'
 const auth = useAuth()
 const { nodes, selectedNodeId, selectNode } = useStronghold()
 const { config: instanceConfig } = useInstanceConfig()
-const fixedStronghold = computed(() => instanceConfig.value?.fixed_stronghold ?? null)
 const logoSrc = computed(() => instanceConfig.value?.logo_url || (instanceConfig.value?.art_assets_enabled !== false ? '/favicon.svg' : null))
 const showCreate = ref(false)
 const showDirectory = ref(false)
@@ -21,7 +20,6 @@ function onCreated() {
 }
 
 function handleLogoClick(event: MouseEvent) {
-  if (fixedStronghold.value) return
   event.preventDefault()
   navigateHome()
 }
@@ -31,9 +29,9 @@ function handleLogoClick(event: MouseEvent) {
   <nav class="node-rail">
     <a
       class="node-rail__logo"
-      :href="fixedStronghold ? `/a/${encodeURIComponent(fixedStronghold.slug)}` : '/'"
-      :title="fixedStronghold ? `返回 ${fixedStronghold.name}` : '返回 OMEW 首页'"
-      :aria-label="fixedStronghold ? `返回 ${fixedStronghold.name}` : '返回 OMEW 首页'"
+      href="/"
+      title="返回 OMEW 首页"
+      aria-label="返回 OMEW 首页"
       @click="handleLogoClick"
     >
       <img v-if="logoSrc" :src="logoSrc" alt="" aria-hidden="true" />
@@ -54,12 +52,12 @@ function handleLogoClick(event: MouseEvent) {
           <span v-else>{{ node.name.slice(0, 1) }}</span>
         </button>
       </li>
-      <li v-if="auth.isAuthenticated.value && !fixedStronghold">
+      <li v-if="auth.isAuthenticated.value">
         <button class="node-rail__item node-rail__item--add" type="button" title="发现据点" aria-label="发现据点" @click="showDirectory = true">
           <AppIcon name="compass" :size="18" />
         </button>
       </li>
-      <li v-if="auth.isAuthenticated.value && !fixedStronghold">
+      <li v-if="auth.isAuthenticated.value">
         <button class="node-rail__item node-rail__item--add" type="button" title="创建据点" aria-label="创建据点" @click="showCreate = true">
           <AppIcon name="add" :size="18" />
         </button>

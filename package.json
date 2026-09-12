@@ -24,6 +24,7 @@
   },
   "dependencies": {
     "@simplewebauthn/server": "^13.3.2",
+    "jose": "^6.2.12",
     "otpauth": "^9.5.1"
   }
 }

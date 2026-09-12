@@ -13,7 +13,7 @@ describe("instance policy editor contract", () => {
     expect(modal).toMatch(/trustedServersError\(policyForm\.trustedServers\)/);
     expect(modal).toMatch(/domainListError\(policyForm\.federationPeers\)/);
     expect(modal).toMatch(/actorListError\(policyForm\.strongholdCreators\)/);
-    expect(modal).toMatch(/api\.patchAdminConfig\(auth\.token\.value,\s*\{/);
+    expect(modal).toMatch(/api\.patchAdminConfig\(auth\.token\.value,\s*patch\)/);
     for (const field of [
       "allow_root",
       "root_requirements",
@@ -24,6 +24,12 @@ describe("instance policy editor contract", () => {
       "allow_guest_browsing",
       "max_file_bytes",
       "user_storage_quota_bytes",
+      "instance_mode",
+      "root_stronghold",
+      "sso_mode",
+      "sso_issuer",
+      "sso_client_id",
+      "sso_provider_name",
     ]) expect(modal).toContain(`${field}:`);
   });
 
@@ -34,6 +40,6 @@ describe("instance policy editor contract", () => {
   });
 
   it("keeps mock mode on the same owner-only mutable contract", () => {
-    expect(mockApi).toMatch(/async patchAdminConfig[\s\S]*?requireOwner\(token\)[\s\S]*?Object\.assign\(config, patch\)/);
+    expect(mockApi).toMatch(/async patchAdminConfig[\s\S]*?requireOwner\(token\)[\s\S]*?Object\.assign\(config, settings\)/);
   });
 });

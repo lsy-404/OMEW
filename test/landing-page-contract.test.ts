@@ -20,7 +20,7 @@ describe('OMEW landing page contract', () => {
     expect(app).not.toMatch(/<AuthModal\b[^>]*(?:v-if|v-else|v-else-if)=/)
     expect(app).toMatch(/routeInstalled/)
     expect(app).toMatch(/isHome\s*=\s*ref\(location\.pathname\s*===\s*['"]\/['"]\)/)
-    expect(app).toMatch(/showLanding\s*=\s*computed\(\(\)\s*=>\s*isHome\.value\s*&&\s*!instanceConfigLoading\.value\s*&&\s*!fixedStronghold\.value\)/)
+    expect(app).toMatch(/showLanding\s*=\s*computed\(\(\)\s*=>\s*isHome\.value\s*&&\s*!instanceConfigLoading\.value\s*&&\s*!singleMode\.value\)/)
     expect(app).toMatch(/:authenticated="auth\.isAuthenticated\.value"/)
     expect(app).toMatch(/authenticated\s*&&\s*!isHome\.value/)
     expect(app).toMatch(/routeInstalled[\s\S]{0,500}useRoute\s*\(/)
@@ -181,7 +181,7 @@ describe('OMEW landing page contract', () => {
   })
 
   it('makes the desktop logo and mobile home entry return to the root homepage', () => {
-    expect(nodeRail).toContain(":href=\"fixedStronghold ? `/a/${encodeURIComponent(fixedStronghold.slug)}` : '/'\"")
+    expect(nodeRail).toContain('href="/"')
     expect(nodeRail).toContain('返回 OMEW 首页')
     expect(nodeRail).not.toMatch(/node-rail__logo[\s\S]{0,160}@click="showDirectory\s*=\s*true"/)
     expect(mobileNav).toMatch(/class="mobile-nav__item mobile-nav__item--home"\s+href="\/"/)

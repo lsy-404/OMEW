@@ -14,12 +14,24 @@ import {
 import { emailError, passwordError, requiredError, usernameError } from '../utils/validate'
 import { WinButton, WinInfoBar, WinSelectorBar } from '../vendor/winui'
 
-// the login/register form body, shared by AuthGate's full-screen gate and
-// AuthModal's popup shell (task 034) - hosts own the surrounding chrome
+// The login/register form body is shared by AuthGate's full-screen gate and
+// AuthModal's popup shell - hosts own the surrounding chrome
 // (card border vs. modal panel), this only owns the form itself.
 
 const auth = useAuth()
 const { config: instanceConfig, loading: configLoading, error: configError } = useInstanceConfig()
+const ssoRequired = computed(() => instanceConfig.value?.sso_mode === 'required')
+const ssoAvailable = computed(() => instanceConfig.value?.sso_mode !== 'disabled' && instanceConfig.value?.sso_enabled === true)
+const ssoBusy = ref(false)
+const ssoError = ref('')
+
+function startSso() {
+  if (ssoBusy.value || !ssoAvailable.value) return
+  ssoBusy.value = true
+  ssoError.value = ''
+  const returnTo = `${window.location.pathname}${window.location.search}`
+  window.location.assign(`/api/auth/oidc/start?return_to=${encodeURIComponent(returnTo)}`)
+}
 
 type Tab = 'login' | 'register'
 const tab = ref<Tab>('login')
@@ -39,7 +51,8 @@ function onTabSelect(item: { value: Tab }) {
 watch(
   instanceConfig,
   (cfg) => {
-    if (cfg?.allow_root && !auth.sessionExpired.value) tab.value = 'register'
+    if (cfg?.sso_mode === 'required') tab.value = 'login'
+    else if (cfg?.allow_root && !auth.sessionExpired.value) tab.value = 'register'
   },
   { immediate: true },
 )
@@ -208,6 +221,14 @@ function finishRegistration() {
   if (!pendingBackup.value) return
   auth.setSession(pendingBackup.value.session)
 }
+
+watch(
+  () => auth.ssoCompletionError.value,
+  (error) => {
+    if (error) ssoError.value = error
+  },
+  { immediate: true },
+)
 </script>
 
 <template>
@@ -221,7 +242,7 @@ function finishRegistration() {
     </WinInfoBar>
 
     <WinSelectorBar
-      v-if="instanceConfig?.allow_root"
+      v-if="instanceConfig?.allow_root && !ssoRequired"
       class="auth-card__tabs"
       :Items="TAB_OPTIONS"
       :SelectedItem="tabSelected"
@@ -229,6 +250,24 @@ function finishRegistration() {
     />
 
     <template v-if="tab === 'login'">
+      <template v-if="ssoRequired">
+        <p class="field__hint">本节点仅允许使用统一身份登录。</p>
+        <WinButton
+          Style="AccentButtonStyle"
+          class="auth-form__submit"
+          type="button"
+          :IsEnabled="ssoAvailable && !ssoBusy"
+          @click="startSso"
+        >
+          {{ ssoBusy ? '正在跳转…' : `使用 ${instanceConfig?.sso_provider_name || 'SSO'} 登录` }}
+        </WinButton>
+        <WinInfoBar v-if="!ssoAvailable" :IsOpen="true" :IsClosable="false" :IsIconVisible="false" Severity="Error">
+          管理员尚未完成 SSO 配置。
+        </WinInfoBar>
+        <p v-if="ssoError" class="field__error">{{ ssoError }}</p>
+      </template>
+
+      <template v-else>
       <form v-if="!totpPending" class="auth-form" novalidate @submit.prevent="submitLogin">
         <div class="field">
           <label class="field__label" for="login-username">用户名</label>
@@ -278,6 +317,21 @@ function finishRegistration() {
         </WinButton>
         <WinButton Style="SubtleButtonStyle" class="auth-form__submit" type="button" @click="cancelTotpLogin">返回</WinButton>
       </form>
+
+      <template v-if="ssoAvailable">
+        <div class="auth-form__divider">或</div>
+        <WinButton
+          Style="DefaultButtonStyle"
+          class="auth-form__submit"
+          type="button"
+          :IsEnabled="!ssoBusy"
+          @click="startSso"
+        >
+          {{ ssoBusy ? '正在跳转…' : `使用 ${instanceConfig?.sso_provider_name || 'SSO'} 登录` }}
+        </WinButton>
+        <p v-if="ssoError" class="field__error">{{ ssoError }}</p>
+      </template>
+      </template>
     </template>
 
     <template v-else>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getInstanceConfig } from "../server/src/config";
+import { getInstanceConfig, getSsoConfig, isValidOidcIssuer } from "../server/src/config";
 
 // m0-protocol §7.9: instance policy is deployment env config, parsed tolerantly
 // (server/src/config.ts) - a malformed var degrades to its default rather than
@@ -15,6 +15,8 @@ function envWith(vars: Record<string, string | undefined>): Env {
 describe("getInstanceConfig: defaults", () => {
   it("falls back to the documented safe defaults when every var is unset", () => {
     expect(getInstanceConfig(envWith({}))).toEqual({
+      instance_mode: "multi",
+      root_stronghold: null,
       allow_root: true,
       root_requirements: [],
       trusted_identity_servers: ["*"],
@@ -67,6 +69,21 @@ describe("getInstanceConfig: comma-separated list parsing", () => {
 });
 
 describe("getInstanceConfig: enum parsing", () => {
+  it("accepts single mode and a valid root stronghold slug", () => {
+    expect(getInstanceConfig(envWith({ INSTANCE_MODE: "single", ROOT_STRONGHOLD: "main-lobby" }))).toMatchObject({
+      instance_mode: "single",
+      root_stronghold: "main-lobby",
+    });
+  });
+
+  it("falls back to multi mode and no root for malformed single-mode settings", () => {
+    expect(getInstanceConfig(envWith({ INSTANCE_MODE: "single", ROOT_STRONGHOLD: "Not Valid" }))).toMatchObject({
+      instance_mode: "single",
+      root_stronghold: null,
+    });
+    expect(getInstanceConfig(envWith({ INSTANCE_MODE: "invalid", ROOT_STRONGHOLD: "root" })).instance_mode).toBe("multi");
+  });
+
   it("falls back to 'restricted' on an unrecognized stronghold_creation_policy", () => {
     expect(getInstanceConfig(envWith({ STRONGHOLD_CREATION: "invited-only" })).stronghold_creation_policy).toBe("restricted");
   });
@@ -74,6 +91,28 @@ describe("getInstanceConfig: enum parsing", () => {
   it("accepts every documented enum value", () => {
     expect(getInstanceConfig(envWith({ STRONGHOLD_CREATION: "restricted" })).stronghold_creation_policy).toBe("restricted");
     expect(getInstanceConfig(envWith({ STRONGHOLD_CREATION: "application" })).stronghold_creation_policy).toBe("application");
+  });
+});
+
+describe("getSsoConfig", () => {
+  it("requires a complete OIDC client configuration before reporting SSO as configured", () => {
+    expect(getSsoConfig(envWith({ SSO_MODE: "optional", SSO_ISSUER: "https://identity.example", SSO_CLIENT_ID: "omew" }))).toMatchObject({
+      mode: "optional",
+      configured: false,
+    });
+    expect(getSsoConfig(envWith({
+      SSO_MODE: "required",
+      SSO_ISSUER: "https://identity.example",
+      SSO_CLIENT_ID: "omew",
+      SSO_CLIENT_SECRET: "secret",
+    }))).toMatchObject({ mode: "required", configured: true });
+  });
+
+  it("accepts HTTPS issuers and loopback HTTP only for local development", () => {
+    expect(isValidOidcIssuer("https://identity.example")).toBe(true);
+    expect(isValidOidcIssuer("http://localhost:8787")).toBe(true);
+    expect(isValidOidcIssuer("http://identity.example")).toBe(false);
+    expect(isValidOidcIssuer("https://identity.example?tenant=one")).toBe(false);
   });
 });
 

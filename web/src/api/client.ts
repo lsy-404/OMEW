@@ -2,6 +2,7 @@ import type { AuthenticationResponseJSON, RegistrationResponseJSON } from '@simp
 import { ApiRequestError } from './errors'
 import type {
   AdminInstanceConfig,
+  AdminInstanceConfigPatch,
   AdminUsersPage,
   AvatarUploadResult,
   AuthResponse,
@@ -136,7 +137,7 @@ function toFeatureRestrictions(entry: { chat: WireFeatureRestrictionState; posts
   return { chat: toFeatureRestrictionState(entry.chat), posts: toFeatureRestrictionState(entry.posts) }
 }
 
-// groups is populated separately (task 048: server-level groups are no
+// Groups are populated separately (server-level groups are no
 // longer embedded by the stronghold member-list route) - see
 // getStrongholdMembers's batch fetch against /api/server-groups/members.
 function toStrongholdMember(entry: WireMemberEntry): StrongholdMember {
@@ -233,7 +234,7 @@ function authHeaders(token: string): HeadersInit {
 
 // several stronghold-scoped reads (config/rooms/posts) are open to an
 // unauthenticated guest on a public stronghold when the instance policy
-// allows it (task 034, server's resolveGuestOrMember) - a null token just
+// allows it (server's resolveGuestOrMember) - a null token just
 // means "send the request without an Authorization header" and the server
 // sorts out member vs. guest from there.
 function optionalAuthHeaders(token: string | null): HeadersInit | undefined {
@@ -243,10 +244,10 @@ function optionalAuthHeaders(token: string | null): HeadersInit | undefined {
 export const realApi = {
   getInstanceConfig: () => request<InstanceConfig>('/api/instance/config'),
 
-  exchangeStarDustSession: (bridgeToken: string) =>
-    request<AuthResponse>('/api/integration/star-dust/session', {
+  completeOidcLogin: (code: string) =>
+    request<AuthResponse>('/api/auth/oidc/complete', {
       method: 'POST',
-      body: JSON.stringify({ token: bridgeToken }),
+      body: JSON.stringify({ code }),
     }),
 
   getDirectory: () => request<{ strongholds: DirectoryEntry[] }>('/api/directory').then((r) => r.strongholds),
@@ -334,7 +335,7 @@ export const realApi = {
   getAdminConfig: (token: string) =>
     request<AdminInstanceConfig>('/api/admin/instance/config', { headers: authHeaders(token) }),
 
-  patchAdminConfig: (token: string, patch: Partial<AdminInstanceConfig>) =>
+  patchAdminConfig: (token: string, patch: AdminInstanceConfigPatch) =>
     request<AdminInstanceConfig>('/api/admin/instance/config', {
       method: 'PATCH',
       headers: authHeaders(token),
@@ -596,7 +597,7 @@ export const realApi = {
       body: JSON.stringify({ to: toActor }),
     }),
 
-  // ---- server-level user groups (task 048, admin API) --------------------------
+  // ---- server-level user groups (admin API) -------------------------------------
 
   getServerGroups: (token: string) =>
     request<{ groups: ServerGroup[] }>('/api/admin/server-groups', { headers: authHeaders(token) }).then((r) => r.groups),
@@ -640,7 +641,7 @@ export const realApi = {
       headers: authHeaders(token),
     }),
 
-  // read-only batch lookup, guest-readable per instance policy (task 048) -
+  // Read-only batch lookup, guest-readable per instance policy -
   // shared by the stronghold member list (badges) and the server admin
   // panel's member group controls.
   getGroupsForMembers: (token: string | null, localparts: string[]) => fetchGroupsForLocalparts(token, localparts),
@@ -694,7 +695,7 @@ export const realApi = {
 
   getEmotes: (token: string) => request<{ packs: EmotePack[] }>('/api/emotes', { headers: authHeaders(token) }).then((r) => r.packs),
 
-  // ---- instance emote pack administration (018 admin endpoints, task 039 UI) ---
+  // ---- instance emote pack administration (admin endpoints) ---------------------
 
   createEmotePack: (token: string, name: string) =>
     request<EmotePack>('/api/admin/emote-packs', { method: 'POST', headers: authHeaders(token), body: JSON.stringify({ name }) }),

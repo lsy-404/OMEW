@@ -5,10 +5,20 @@ DEV_TOKEN_SECRET=change-me-to-a-random-value
 # CF_ACCOUNT_ID=
 # CF_API_TOKEN=
 
+# OIDC client credentials. Keep the client secret in `.dev.vars` locally and
+# configure it as a Worker Secret in deployed environments.
+# SSO_MODE=disabled
+# SSO_ISSUER=https://identity.example
+# SSO_CLIENT_ID=openmew-local
+# SSO_CLIENT_SECRET=
+# SSO_PROVIDER_NAME=SSO
+
 # Instance policy (m0-protocol §7.9) - deployed defaults live in wrangler.jsonc
 # `vars`; uncomment any of these here to override locally without touching that
 # file. Not secrets, just env config - parsing lives in server/src/config.ts.
 # ALLOW_ROOT=1
+# INSTANCE_MODE=multi
+# ROOT_STRONGHOLD=
 # ROOT_REQUIREMENTS=
 # TRUSTED_IDENTITY_SERVERS=*
 # FEDERATION_PEERS=
