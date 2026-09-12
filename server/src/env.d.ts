@@ -15,7 +15,6 @@ interface Env {
   SSO_USE_JARM?: string;
   SSO_USE_DPOP?: string;
   SSO_JAR_PRIVATE_JWK?: string;
-  SSO_PROVIDER?: Fetcher;
   INSTANCE_MODE?: string;
   ROOT_STRONGHOLD?: string;
   INSTANCE_LOGO_URL?: string;
@@ -39,7 +38,6 @@ declare namespace Cloudflare {
     SSO_USE_JARM?: string;
     SSO_USE_DPOP?: string;
     SSO_JAR_PRIVATE_JWK?: string;
-    SSO_PROVIDER?: Fetcher;
     INSTANCE_MODE?: string;
     ROOT_STRONGHOLD?: string;
     INSTANCE_LOGO_URL?: string;

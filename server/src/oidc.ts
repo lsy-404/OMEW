@@ -27,12 +27,7 @@ const OIDC_SUBJECT_RE = /^[\x21-\x7e]{1,255}$/;
 const TRANSACTION_COOKIE = "__Host-omew-oidc";
 const DEVELOPMENT_TRANSACTION_COOKIE = "omew-oidc-dev";
 
-export type OidcFetch = (input: Request | string | URL, init?: RequestInit) => Promise<Response>;
-
-export function oidcProviderFetcher(env: Env): OidcFetch {
-  if (!env.SSO_PROVIDER) return fetch;
-  return (input, init) => env.SSO_PROVIDER!.fetch(new Request(input, init));
-}
+type OidcFetch = (input: Request | string | URL, init?: RequestInit) => Promise<Response>;
 
 const SAFE_ID_TOKEN_ALGORITHMS = ["RS256", "PS256", "ES256"] as const;
 
@@ -177,10 +172,11 @@ async function fetchJson(
   try {
     response = await fetcher(url, {
       ...init,
-      redirect: "error",
+      redirect: "manual",
       signal: AbortSignal.timeout(OIDC_FETCH_TIMEOUT_MS),
     });
-  } catch {
+  } catch (error) {
+    console.error("OIDC upstream request failed", error instanceof Error ? `${error.name}: ${error.message}` : "Unknown error");
     throw new OidcError("SSO_UPSTREAM_UNAVAILABLE", 502);
   }
   if (!response.ok) throw new OidcError("SSO_UPSTREAM_ERROR", 502);

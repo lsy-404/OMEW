@@ -16,9 +16,6 @@
     "RoomDO": { "type": "durable-object", "storage": "sqlite" },
     "StrongholdDO": { "type": "durable-object", "storage": "sqlite" }
   },
-  "services": [
-    { "binding": "SSO_PROVIDER", "service": "stardust" }
-  ],
   "vars": {
     "INSTANCE_DOMAIN": "omew.stardustinfinity.top",
     "CF_WORKER_NAME": "stardust-omew",

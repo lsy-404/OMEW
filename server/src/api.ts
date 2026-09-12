@@ -21,7 +21,6 @@ import {
   finishOidcAuthorization,
   mapOidcIdentity,
   oidcLogoutUrl,
-  oidcProviderFetcher,
   refreshOidcSession,
   revokeOidcSession,
   storeOidcSession,
@@ -804,7 +803,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     const sso = getSsoConfig(env);
     if (sso.mode === "disabled") return apiError(403, "SSO_DISABLED");
     try {
-      return await beginOidcAuthorization(request, env, sso, oidcProviderFetcher(env));
+      return await beginOidcAuthorization(request, env, sso);
     } catch (error) {
       if (error instanceof OidcError) return apiError(error.status, error.code);
       throw error;
@@ -815,7 +814,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     const sso = getSsoConfig(env);
     if (sso.mode === "disabled") return apiError(403, "SSO_DISABLED");
     try {
-      const result = await finishOidcAuthorization(request, env, sso, oidcProviderFetcher(env));
+      const result = await finishOidcAuthorization(request, env, sso);
       const mapped = await mapOidcIdentity(env, result.identity);
       if (mapped.status !== "active") return apiError(403, "ACCOUNT_DISABLED");
       const completion = await createOidcLoginCompletion(env, mapped.localpart, sso, result.tokens);
@@ -877,7 +876,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     const sso = getSsoConfig(env);
     if (!sso.configured) return apiError(503, "SSO_NOT_CONFIGURED");
     try {
-      const refreshed = await refreshOidcSession(env, session, sso, oidcProviderFetcher(env));
+      const refreshed = await refreshOidcSession(env, session, sso);
       const localpart = localpartOfActor(session.actor);
       const user = await localUserByLocalpart(env, localpart);
       if (!user || user.status !== "active") return apiError(401, "ACCOUNT_DISABLED");
@@ -895,7 +894,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     let logoutUrl: string | null = null;
     if (session.auth_source === "sso") {
       const sso = getSsoConfig(env);
-      if (sso.configured) logoutUrl = await oidcLogoutUrl(env, session, sso, `${new URL(request.url).origin}/api/auth/logout/complete`, oidcProviderFetcher(env));
+      if (sso.configured) logoutUrl = await oidcLogoutUrl(env, session, sso, `${new URL(request.url).origin}/api/auth/logout/complete`);
       await revokeOidcSession(env, session);
     }
     return json({ ok: true, logout_url: logoutUrl });
