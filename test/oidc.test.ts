@@ -1,12 +1,13 @@
 import { env } from "cloudflare:test";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   beginOidcAuthorization,
   createOidcLoginCompletion,
   consumeOidcLoginCompletion,
   finishOidcAuthorization,
   mapOidcIdentity,
+  oidcProviderFetcher,
 } from "../server/src/oidc";
 import { getSsoConfig } from "../server/src/config";
 import { ensureMigrated } from "./helpers";
@@ -102,6 +103,17 @@ describe("OMEW OIDC client", () => {
       email: "sso-user@example.com",
       email_verified: true,
     });
+  });
+
+  it("uses an optional service binding for a same-account provider", async () => {
+    const bindingFetch = vi.fn(async (request: Request) => Response.json({ url: request.url }));
+    const providerFetch = oidcProviderFetcher({ SSO_PROVIDER: { fetch: bindingFetch } } as unknown as Env);
+    const response = await providerFetch(`${ISSUER}/.well-known/openid-configuration`, {
+      headers: { Accept: "application/json" },
+    });
+
+    expect(bindingFetch).toHaveBeenCalledOnce();
+    expect(await response.json()).toEqual({ url: `${ISSUER}/.well-known/openid-configuration` });
   });
 
   it("maps one external subject to one local account and consumes completion codes once", async () => {

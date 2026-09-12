@@ -27,7 +27,12 @@ const OIDC_SUBJECT_RE = /^[\x21-\x7e]{1,255}$/;
 const TRANSACTION_COOKIE = "__Host-omew-oidc";
 const DEVELOPMENT_TRANSACTION_COOKIE = "omew-oidc-dev";
 
-type OidcFetch = (input: Request | string | URL, init?: RequestInit) => Promise<Response>;
+export type OidcFetch = (input: Request | string | URL, init?: RequestInit) => Promise<Response>;
+
+export function oidcProviderFetcher(env: Env): OidcFetch {
+  if (!env.SSO_PROVIDER) return fetch;
+  return (input, init) => env.SSO_PROVIDER!.fetch(new Request(input, init));
+}
 
 const SAFE_ID_TOKEN_ALGORITHMS = ["RS256", "PS256", "ES256"] as const;
 
