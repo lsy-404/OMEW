@@ -10,6 +10,7 @@ interface Env {
   FIXED_STRONGHOLD?: string;
   INSTANCE_LOGO_URL?: string;
   ENABLE_EMOTES?: string;
+  USE_BUILTIN_EMOTES?: string;
   ENABLE_REACTIONS?: string;
   USE_ART_ASSETS?: string;
   CF_API_TOKEN?: string;
@@ -23,6 +24,7 @@ declare namespace Cloudflare {
     FIXED_STRONGHOLD?: string;
     INSTANCE_LOGO_URL?: string;
     ENABLE_EMOTES?: string;
+    USE_BUILTIN_EMOTES?: string;
     ENABLE_REACTIONS?: string;
     USE_ART_ASSETS?: string;
     CF_API_TOKEN?: string;

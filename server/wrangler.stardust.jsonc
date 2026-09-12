@@ -28,6 +28,7 @@
     "FIXED_STRONGHOLD": "medium5",
     "INSTANCE_LOGO_URL": "https://stardustinfinity.top/favicon.svg",
     "ENABLE_EMOTES": "1",
+    "USE_BUILTIN_EMOTES": "1",
     "ENABLE_REACTIONS": "1",
     "USE_ART_ASSETS": "0",
     "ALLOW_GUEST_BROWSING": "1",

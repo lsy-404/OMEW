@@ -6,6 +6,7 @@ import landingPage from "../web/src/components/LandingPage.vue?raw";
 import mobileNavBar from "../web/src/components/MobileNavBar.vue?raw";
 import nodeRail from "../web/src/components/NodeRail.vue?raw";
 import postModal from "../web/src/components/PostModal.vue?raw";
+import useEmotes from "../web/src/composables/useEmotes.ts?raw";
 
 describe("fixed stronghold web contract", () => {
   it("routes a configured fixed instance into its stronghold instead of rendering the landing page", () => {
@@ -26,6 +27,7 @@ describe("fixed stronghold web contract", () => {
     expect(chatPane).toContain("emotesEnabled")
     expect(chatPane).toContain("reactionsEnabled")
     expect(postModal).toContain("reactionsEnabled")
+    expect(useEmotes).toContain("builtin_emotes_enabled")
     expect(landingPage).toContain("v-if=\"artAssetsEnabled\"")
     expect(emptyState).toContain("v-if=\"image\"")
   });

@@ -25,6 +25,7 @@ export interface InstanceConfig {
   fixed_stronghold: FixedStronghold | null
   logo_url: string | null
   emotes_enabled: boolean
+  builtin_emotes_enabled: boolean
   reactions_enabled: boolean
   art_assets_enabled: boolean
 }

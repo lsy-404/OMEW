@@ -814,6 +814,7 @@ export const mockApi = {
       fixed_stronghold: null,
       logo_url: null,
       emotes_enabled: true,
+      builtin_emotes_enabled: true,
       reactions_enabled: true,
       art_assets_enabled: true,
     })

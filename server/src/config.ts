@@ -14,6 +14,7 @@ import type { InstanceConfig, RootRequirement, StrongholdCreationPolicy } from "
 export interface InstanceBranding {
   logo_url: string | null;
   emotes_enabled: boolean;
+  builtin_emotes_enabled: boolean;
   reactions_enabled: boolean;
   art_assets_enabled: boolean;
 }
@@ -75,6 +76,7 @@ export function getInstanceBranding(env: Env): InstanceBranding {
   return {
     logo_url: logoUrl,
     emotes_enabled: parseBool(env.ENABLE_EMOTES, true),
+    builtin_emotes_enabled: parseBool(env.USE_BUILTIN_EMOTES, true),
     reactions_enabled: parseBool(env.ENABLE_REACTIONS, true),
     art_assets_enabled: parseBool(env.USE_ART_ASSETS, true),
   };

@@ -15,6 +15,7 @@ describe("fixed stronghold deployment mode", () => {
     await ensureMigrated();
     env.FIXED_STRONGHOLD = "medium5";
     env.USE_ART_ASSETS = "0";
+    env.USE_BUILTIN_EMOTES = "0";
   });
 
   afterAll(async () => {
@@ -31,6 +32,7 @@ describe("fixed stronghold deployment mode", () => {
     await stronghold.purgeForStrongholdDeletion();
     env.FIXED_STRONGHOLD = undefined;
     env.USE_ART_ASSETS = undefined;
+    env.USE_BUILTIN_EMOTES = undefined;
   });
 
   it("initializes and exposes only medium5", async () => {
@@ -40,6 +42,7 @@ describe("fixed stronghold deployment mode", () => {
       fixed_stronghold: { id: "medium5", name: "medium5", slug: "medium5" },
       logo_url: null,
       emotes_enabled: true,
+      builtin_emotes_enabled: false,
       reactions_enabled: true,
       art_assets_enabled: false,
     });
