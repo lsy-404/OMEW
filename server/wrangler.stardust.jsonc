@@ -4,7 +4,7 @@
   "account_id": "20c1630f373f1d9663f96f153d4a3194",
   "main": "src/api.ts",
   "compatibility_date": "2026-08-21",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "observability": { "enabled": true, "head_sampling_rate": 1 },
   "durable_objects": {
     "bindings": [
@@ -21,7 +21,13 @@
     "CF_WORKER_NAME": "stardust-omew",
     "INSTANCE_MODE": "single",
     "ROOT_STRONGHOLD": "medium5",
-    "SSO_MODE": "disabled",
+    "SSO_MODE": "required",
+    "SSO_ISSUER": "https://stardustinfinity.top",
+    "SSO_CLIENT_ID": "stardust-omew",
+    "SSO_PROVIDER_NAME": "星尘粉丝站",
+    "SSO_USE_PAR": "1",
+    "SSO_USE_JARM": "0",
+    "SSO_USE_DPOP": "0",
     "ALLOW_ROOT": "0",
     "ROOT_REQUIREMENTS": "",
     "TRUSTED_IDENTITY_SERVERS": "*",

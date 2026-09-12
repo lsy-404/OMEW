@@ -172,10 +172,11 @@ async function fetchJson(
   try {
     response = await fetcher(url, {
       ...init,
-      redirect: "error",
+      redirect: "manual",
       signal: AbortSignal.timeout(OIDC_FETCH_TIMEOUT_MS),
     });
-  } catch {
+  } catch (error) {
+    console.error("OIDC upstream request failed", error instanceof Error ? `${error.name}: ${error.message}` : "Unknown error");
     throw new OidcError("SSO_UPSTREAM_UNAVAILABLE", 502);
   }
   if (!response.ok) throw new OidcError("SSO_UPSTREAM_ERROR", 502);

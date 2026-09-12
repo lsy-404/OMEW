@@ -53,8 +53,9 @@ describe("OMEW OIDC client", () => {
       id_token_signing_alg_values_supported: ["RS256"],
     };
 
-    const start = await beginOidcAuthorization(request, env, getSsoConfig(env), async (input) => {
+    const start = await beginOidcAuthorization(request, env, getSsoConfig(env), async (input, init) => {
       expect(String(input)).toBe(`${ISSUER}/.well-known/openid-configuration`);
+      expect(init?.redirect).toBe("manual");
       return Response.json(discovery);
     });
     expect(start.status).toBe(302);
@@ -102,6 +103,15 @@ describe("OMEW OIDC client", () => {
       email: "sso-user@example.com",
       email_verified: true,
     });
+  });
+
+  it("rejects upstream redirects using the Workers-supported manual mode", async () => {
+    const request = new Request("http://localhost/api/auth/oidc/start?return_to=%2F");
+
+    await expect(beginOidcAuthorization(request, env, getSsoConfig(env), async (_input, init) => {
+      expect(init?.redirect).toBe("manual");
+      return new Response(null, { status: 302, headers: { Location: "https://redirected.example" } });
+    })).rejects.toMatchObject({ code: "SSO_UPSTREAM_ERROR", status: 502 });
   });
 
   it("maps one external subject to one local account and consumes completion codes once", async () => {
