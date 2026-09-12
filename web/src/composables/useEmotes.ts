@@ -3,10 +3,13 @@ import { api } from '../api'
 import type { EmotePack } from '../api/types'
 import { BUILTIN_EMOTE_PACK, BUILTIN_REACTION_PACK } from '../assets/mew-emotes'
 import { useAuth } from './useAuth'
+import { useInstanceConfig } from './useInstanceConfig'
 
 const instancePacks = ref<EmotePack[]>([])
 const loading = ref(false)
 let loaded = false
+const { config: instanceConfig } = useInstanceConfig()
+const enabled = computed(() => instanceConfig.value?.emotes_enabled !== false)
 
 async function loadEmotes() {
   const auth = useAuth()
@@ -30,15 +33,15 @@ const packs = computed<EmotePack[]>(() => [...instancePacks.value, BUILTIN_REACT
 export function useEmotes() {
   const auth = useAuth()
   watch(
-    auth.isAuthenticated,
-    (authenticated) => {
-      if (authenticated && !loaded) void loadEmotes()
-      else if (!authenticated) {
+    [auth.isAuthenticated, enabled],
+    ([authenticated, emotesEnabled]) => {
+      if (authenticated && emotesEnabled && !loaded) void loadEmotes()
+      else if (!authenticated || !emotesEnabled) {
         instancePacks.value = []
         loaded = false
       }
     },
     { immediate: true },
   )
-  return { packs, loading }
+  return { packs: computed(() => (enabled.value ? packs.value : [])), loading, enabled }
 }

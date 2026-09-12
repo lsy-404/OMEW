@@ -35,7 +35,7 @@ const serverAdminOpen = ref(false)
 const strongholdAdminOpen = ref(false)
 const strongholdAdminTab = ref<'members' | 'settings'>('members')
 const { activeView } = useShellView()
-const { config: instanceConfig } = useInstanceConfig()
+const { config: instanceConfig, loading: instanceConfigLoading } = useInstanceConfig()
 const { nodes, loading: strongholdsLoading, selectNode } = useStronghold()
 const hasStrongholds = computed(() => nodes.value.length > 0)
 useDocumentTitle(isHome)
@@ -45,7 +45,9 @@ useDocumentTitle(isHome)
 // yet, same fallback as before) - otherwise the four-column shell renders
 // directly in its read-only guest state (useStronghold's isGuestMode).
 const showAuthGate = computed(() => !auth.isAuthenticated.value && !instanceConfig.value?.allow_guest_browsing)
-const showLanding = computed(() => isHome.value)
+const fixedStronghold = computed(() => instanceConfig.value?.fixed_stronghold ?? null)
+const showLanding = computed(() => isHome.value && !instanceConfigLoading.value && !fixedStronghold.value)
+const showFixedLoading = computed(() => isHome.value && (instanceConfigLoading.value || Boolean(fixedStronghold.value)))
 const STAR_DUST_ORIGIN = 'https://stardustinfinity.top'
 let lastStarDustBridgeToken: string | null = null
 
@@ -65,6 +67,11 @@ function announceEmbeddedReady() {
   if (window.parent !== window) window.parent.postMessage({ type: 'omew-ready' }, STAR_DUST_ORIGIN)
 }
 
+function syncFavicon(logoUrl: string | null | undefined) {
+  const link = document.querySelector<HTMLLinkElement>('link[rel="icon"]')
+  if (link) link.href = logoUrl || '/favicon.svg'
+}
+
 function installRoute(strongholdId?: string, strongholdSlug?: string) {
   if (strongholdSlug && location.pathname === '/') {
     history.pushState(null, '', `/a/${encodeURIComponent(strongholdSlug)}`)
@@ -82,6 +89,10 @@ function installRoute(strongholdId?: string, strongholdSlug?: string) {
 }
 
 function syncHomeFromAddress() {
+  if (fixedStronghold.value && location.pathname === '/') {
+    installRoute(fixedStronghold.value.id, fixedStronghold.value.slug)
+    return
+  }
   isHome.value = location.pathname === '/'
 }
 
@@ -97,6 +108,20 @@ watch(auth.isAuthenticated, (authenticated) => {
     strongholdAdminOpen.value = false
   }
 })
+
+watch(
+  fixedStronghold,
+  (fixed) => {
+    if (fixed && location.pathname === '/') installRoute(fixed.id, fixed.slug)
+  },
+  { immediate: true },
+)
+
+watch(
+  () => instanceConfig.value?.logo_url,
+  (logoUrl) => syncFavicon(logoUrl),
+  { immediate: true },
+)
 
 onMounted(() => {
   window.addEventListener('popstate', syncHomeFromAddress)
@@ -115,9 +140,15 @@ onBeforeUnmount(() => {
       v-if="showLanding"
       :authenticated="auth.isAuthenticated.value"
       :guest-browsing-allowed="instanceConfig?.allow_guest_browsing ?? false"
+      :logo-url="instanceConfig?.logo_url ?? null"
       @authenticate="openAuthModal"
       @browse="installRoute"
     />
+
+    <div v-else-if="showFixedLoading" class="shell__loading" role="status" aria-live="polite" aria-busy="true">
+      <span class="shell__loading-spinner" aria-hidden="true" />
+      <span>正在进入 {{ fixedStronghold?.name ?? 'OMEW' }}…</span>
+    </div>
 
     <AuthGate v-else-if="showAuthGate" />
 

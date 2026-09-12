@@ -121,6 +121,12 @@ export type RootRequirement = "email" | "phone" | "code";
 // m0-protocol §7.9: self-operated instance governance policies.
 export type StrongholdCreationPolicy = "open" | "restricted" | "application";
 
+export interface FixedStronghold {
+  id: string;
+  name: string;
+  slug: string;
+}
+
 export interface InstanceConfig {
   allow_root: boolean;
   root_requirements: RootRequirement[];

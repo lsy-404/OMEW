@@ -11,6 +11,12 @@
 
 import type { InstanceConfig, RootRequirement, StrongholdCreationPolicy } from "./types";
 
+export interface InstanceBranding {
+  logo_url: string | null;
+  emotes_enabled: boolean;
+  reactions_enabled: boolean;
+}
+
 function parseBool(value: string | undefined, fallback: boolean): boolean {
   if (value === undefined) return fallback;
   const v = value.trim().toLowerCase();
@@ -59,5 +65,15 @@ export function getInstanceConfig(env: Env): InstanceConfig {
     stronghold_creation_policy: parseStrongholdCreation(env.STRONGHOLD_CREATION),
     stronghold_creators: parseCsv(env.STRONGHOLD_CREATORS, []),
     allow_guest_browsing: parseBool(env.ALLOW_GUEST_BROWSING, true),
+  };
+}
+
+export function getInstanceBranding(env: Env): InstanceBranding {
+  const logo = env.INSTANCE_LOGO_URL?.trim() ?? "";
+  const logoUrl = logo.startsWith("/") || /^https:\/\//i.test(logo) ? logo : null;
+  return {
+    logo_url: logoUrl,
+    emotes_enabled: parseBool(env.ENABLE_EMOTES, true),
+    reactions_enabled: parseBool(env.ENABLE_REACTIONS, true),
   };
 }

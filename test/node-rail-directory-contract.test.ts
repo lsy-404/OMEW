@@ -5,13 +5,14 @@ import directoryModal from '../web/src/components/DirectoryModal.vue?raw'
 
 describe('据点导轨公开大厅入口', () => {
   it('将左侧 OMEW logo 暴露为返回首页的链接', () => {
-    expect(nodeRail).toMatch(/<a[\s\S]*class="node-rail__logo"[\s\S]*href="\/"[\s\S]*aria-label="返回 OMEW 首页"/)
-    expect(nodeRail).toContain('@click.prevent="navigateHome"')
+    expect(nodeRail).toContain(":href=\"fixedStronghold ? `/a/${encodeURIComponent(fixedStronghold.slug)}` : '/'\"")
+    expect(nodeRail).toContain('@click="handleLogoClick"')
     expect(nodeRail).not.toMatch(/node-rail__logo[\s\S]{0,180}@click="showDirectory = true"/)
     expect(nodeRail).toContain('<DirectoryModal :open="showDirectory" @close="showDirectory = false" />')
   })
 
   it('保留发现与创建据点入口', () => {
+    expect(nodeRail).toContain('auth.isAuthenticated.value && !fixedStronghold')
     expect(nodeRail).toContain('title="发现据点"')
     expect(nodeRail).toContain('title="创建据点"')
   })

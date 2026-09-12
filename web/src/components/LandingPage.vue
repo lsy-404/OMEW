@@ -6,7 +6,7 @@ import AppIcon from './icons/AppIcon.vue'
 import LandingUpdates from './LandingUpdates.vue'
 import LandingWorld from './LandingWorld.vue'
 
-const props = defineProps<{ authenticated: boolean; guestBrowsingAllowed: boolean }>()
+const props = defineProps<{ authenticated: boolean; guestBrowsingAllowed: boolean; logoUrl: string | null }>()
 
 const emit = defineEmits<{
   authenticate: []
@@ -55,7 +55,7 @@ watch(
     <div class="landing-page__hero-screen">
       <header class="landing-page__header">
         <a class="landing-page__brand" href="/" aria-label="OMEW 首页">
-          <img src="/favicon.svg" alt="" aria-hidden="true" />
+          <img :src="logoUrl || '/favicon.svg'" alt="" aria-hidden="true" />
           <span>OMEW</span>
         </a>
       </header>

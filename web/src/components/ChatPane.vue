@@ -7,6 +7,7 @@ import { useChannel } from '../composables/useChannel'
 import { useChatRoom } from '../composables/useChatRoom'
 import { useEmotes } from '../composables/useEmotes'
 import { useImageAttachments } from '../composables/useImageAttachments'
+import { useInstanceConfig } from '../composables/useInstanceConfig'
 import { useItemPermissions } from '../composables/useItemPermissions'
 import { useStickyScroll } from '../composables/useStickyScroll'
 import { useStronghold } from '../composables/useStronghold'
@@ -26,6 +27,7 @@ const auth = useAuth()
 const { packs } = useEmotes()
 const { openAuthModal } = useAuthModal()
 const { isReadOnly } = useStronghold()
+const { config: instanceConfig } = useInstanceConfig()
 const { canEdit, canRetract } = useItemPermissions()
 const { members } = useStrongholdMembers()
 const { selectedChannel } = useChannel()
@@ -53,6 +55,8 @@ const chatInput = ref<HTMLTextAreaElement | null>(null)
 const imageQueue = ref<File[]>([])
 const editingImage = ref<File | null>(null)
 const canParticipate = computed(() => auth.isAuthenticated.value && !isReadOnly.value)
+const emotesEnabled = computed(() => instanceConfig.value?.emotes_enabled !== false)
+const reactionsEnabled = computed(() => instanceConfig.value?.reactions_enabled !== false)
 const CHAT_INPUT_MAX_HEIGHT = 140
 
 // one shared context-menu instance for every message row (rather than one per
@@ -74,7 +78,7 @@ function formatTime(ts: number): string {
 }
 
 function canReactToMessage(text: string): boolean {
-  return canParticipate.value && standaloneEmoteToken(text, emoteLookup.value) === null
+  return reactionsEnabled.value && canParticipate.value && standaloneEmoteToken(text, emoteLookup.value) === null
 }
 
 const messages = computed<MessageVM[]>(() => {
@@ -284,6 +288,7 @@ watch(() => selectedChannel.value?.id, pin, { flush: 'post' })
         :message="entry.message"
         :grouped="entry.grouped"
         :editing="entry.message.seq !== null && editingSeq === entry.message.seq"
+        :reactions-enabled="reactionsEnabled"
         v-model:editing-text="editingText"
         @cancel-edit="cancelEdit"
         @submit-edit="submitEdit"
@@ -325,8 +330,9 @@ watch(() => selectedChannel.value?.id, pin, { flush: 'post' })
         </div>
       </div>
       <div class="chat-pane__compose">
-        <EmotePicker v-if="showEmotePicker" @pick="pickEmote" @close="showEmotePicker = false" />
+        <EmotePicker v-if="showEmotePicker && emotesEnabled" @pick="pickEmote" @close="showEmotePicker = false" />
         <WinButton
+          v-if="emotesEnabled"
           Style="SubtleButtonStyle"
           class="chat-pane__emote-btn"
           title="表情"

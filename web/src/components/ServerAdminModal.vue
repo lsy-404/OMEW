@@ -19,6 +19,7 @@ import type {
   StrongholdCreationPolicy,
 } from '../api/types'
 import { useAuth } from '../composables/useAuth'
+import { useInstanceConfig } from '../composables/useInstanceConfig'
 import { useStorageUsage } from '../composables/useStorageUsage'
 import { actorListError, domainListError, fileUploadError, formatBytes, trustedServersError } from '../utils/validate'
 import { WinButton, WinComboBox, WinInfoBar, WinSelectorBar, WinToggleSwitch } from '../vendor/winui'
@@ -34,6 +35,7 @@ const props = defineProps<{ open: boolean }>()
 const emit = defineEmits<{ close: [] }>()
 
 const auth = useAuth()
+const { config: instanceConfig } = useInstanceConfig()
 
 const ROOT_REQUIREMENT_LABEL: Record<RootRequirement, string> = { email: '邮箱', phone: '手机号', code: '邀请码' }
 const CREATION_POLICY_LABEL: Record<StrongholdCreationPolicy, string> = { open: '开放', restricted: '限制', application: '申请制' }
@@ -734,7 +736,7 @@ watch(
             </WinInfoBar>
 
             <div v-else-if="tab === 'overview'" class="admin-modal__body">
-              <section class="admin-card">
+              <section v-if="instanceConfig?.emotes_enabled !== false" class="admin-card">
                 <h2 class="admin-card__title">实例政策</h2>
                 <template v-if="auth.isServerOwner.value">
                   <WinInfoBar :IsOpen="true" :IsClosable="false" :IsIconVisible="false" Severity="Informational">

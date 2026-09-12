@@ -5,6 +5,7 @@ import { useAuth } from '../composables/useAuth'
 import { useAuthModal } from '../composables/useAuthModal'
 import { useContextMenuGesture } from '../composables/useContextMenuGesture'
 import { useItemPermissions } from '../composables/useItemPermissions'
+import { useInstanceConfig } from '../composables/useInstanceConfig'
 import { usePostModal } from '../composables/usePostModal'
 import { useSectionRoom } from '../composables/useSectionRoom'
 import { useStronghold } from '../composables/useStronghold'
@@ -39,6 +40,7 @@ const {
 } = useSectionRoom()
 const { members } = useStrongholdMembers()
 const { canEdit, canRetract } = useItemPermissions()
+const { config: instanceConfig } = useInstanceConfig()
 
 const replyDraft = ref('')
 const replyError = ref('')
@@ -46,6 +48,7 @@ const editingSeq = ref<number | null>(null)
 const editingText = ref('')
 const actionNotice = ref('')
 const canParticipate = computed(() => auth.isAuthenticated.value && !isReadOnly.value)
+const reactionsEnabled = computed(() => instanceConfig.value?.reactions_enabled !== false)
 
 function displayName(actor: string): string {
   return members.value.find((m) => m.actor === actor)?.display_name ?? actorLocalpart(actor)
@@ -245,6 +248,7 @@ async function sharePost() {
 }
 
 function openReactionPicker(event: MouseEvent) {
+  if (!reactionsEnabled.value) return
   actionNotice.value = ''
   if (!auth.isAuthenticated.value) {
     openAuthModal()
@@ -314,19 +318,20 @@ const visiblePostMedia = computed(() => {
                   <button type="button" class="post-modal__action" aria-label="转发" title="转发" @click="sharePost">
                     <AppIcon name="repeat" :size="19" />
                   </button>
-                  <button type="button" class="post-modal__action" aria-label="添加反应" title="添加反应" @click="openReactionPicker">
+                  <button v-if="reactionsEnabled" type="button" class="post-modal__action" aria-label="添加反应" title="添加反应" @click="openReactionPicker">
                     <AppIcon name="emote" :size="19" />
                   </button>
                 </div>
                 <p v-if="actionNotice" class="post-modal__action-notice" role="status">{{ actionNotice }}</p>
                 <ReactionChips
+                  v-if="reactionsEnabled"
                   :reactions="thread.post.reactions"
-                  :can-toggle="canParticipate"
+                  :can-toggle="reactionsEnabled && canParticipate"
                   @toggle="toggleReaction(thread.post.post_seq, $event)"
                 />
                 <ItemContextMenu
                   ref="postMenuRef"
-                  :can-react="canParticipate"
+                  :can-react="reactionsEnabled && canParticipate"
                   :can-edit="canEdit(thread.post.actor, thread.post.created_at)"
                   :can-retract="canRetract(thread.post.actor, thread.post.created_at)"
                   :mine="thread.post.reactions?.mine"
@@ -368,8 +373,9 @@ const visiblePostMedia = computed(() => {
                         <MediaGrid v-if="reply.body.media?.length" :media="reply.body.media" />
                       </template>
                       <ReactionChips
+                        v-if="reactionsEnabled"
                         :reactions="reply.reactions"
-                        :can-toggle="canParticipate"
+                        :can-toggle="reactionsEnabled && canParticipate"
                         @toggle="onReplyToggleReaction(reply, $event)"
                       />
                     </div>
@@ -377,7 +383,7 @@ const visiblePostMedia = computed(() => {
                 </ul>
                 <ItemContextMenu
                   ref="replyMenuRef"
-                  :can-react="canParticipate"
+                  :can-react="reactionsEnabled && canParticipate"
                   :can-edit="replyCanEdit"
                   :can-retract="replyCanRetract"
                   :mine="activeReply?.reactions?.mine"

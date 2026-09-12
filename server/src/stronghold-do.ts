@@ -291,6 +291,20 @@ export class StrongholdDO extends DurableObject<Env> {
     return config;
   }
 
+  async ensureConfigWithDefaults(
+    id: string,
+    name: string,
+    visibility: "public" | "private",
+    ownerActor: string,
+    description: string,
+    slug: string,
+  ): Promise<ConfigRow> {
+    const config = await this.initConfig(id, name, visibility, ownerActor, description, undefined, slug);
+    if (!(await this.getRoom("lobby"))) await this.createRoom("lobby", "channel", "大厅", ["text"], false);
+    if (!(await this.getRoom("posts"))) await this.createRoom("posts", "section", "帖子", ["text"], false);
+    return config;
+  }
+
   // server admin-only slug rename (api.ts holds the D1-index
   // uniqueness check + gate; this just applies the already-resolved value).
   async updateSlug(newSlug: string): Promise<ConfigRow | null> {

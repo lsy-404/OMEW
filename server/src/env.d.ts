@@ -7,6 +7,10 @@
 interface Env {
   DEV_TOKEN_SECRET: string;
   STAR_DUST_SSO_SECRET?: string;
+  FIXED_STRONGHOLD?: string;
+  INSTANCE_LOGO_URL?: string;
+  ENABLE_EMOTES?: string;
+  ENABLE_REACTIONS?: string;
   CF_API_TOKEN?: string;
   CF_ACCOUNT_ID?: string;
 }
@@ -15,6 +19,10 @@ declare namespace Cloudflare {
   interface Env {
     DEV_TOKEN_SECRET: string;
     STAR_DUST_SSO_SECRET?: string;
+    FIXED_STRONGHOLD?: string;
+    INSTANCE_LOGO_URL?: string;
+    ENABLE_EMOTES?: string;
+    ENABLE_REACTIONS?: string;
     CF_API_TOKEN?: string;
     CF_ACCOUNT_ID?: string;
   }

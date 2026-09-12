@@ -32,7 +32,7 @@ export interface MessageVM {
   canReact: boolean
 }
 
-const props = defineProps<{ message: MessageVM; grouped?: boolean; editing?: boolean }>()
+const props = defineProps<{ message: MessageVM; grouped?: boolean; editing?: boolean; reactionsEnabled: boolean }>()
 const editingText = defineModel<string>('editingText', { default: '' })
 const emit = defineEmits<{
   'cancel-edit': []
@@ -131,6 +131,7 @@ function onTouchStart(event: TouchEvent) {
           <MediaGrid v-if="message.media?.length" class="message-bubble__media" :media="message.media" />
         </div>
         <ReactionChips
+          v-if="reactionsEnabled"
           :reactions="message.reactions"
           :can-toggle="message.canReact"
           @toggle="emit('toggle-reaction', $event)"

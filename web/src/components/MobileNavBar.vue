@@ -1,11 +1,15 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { navigateHome } from '../composables/useRoute'
 import { useShellView } from '../composables/useShellView'
+import { useInstanceConfig } from '../composables/useInstanceConfig'
 import type { ShellView } from '../composables/useShellView'
 import AppIcon from './icons/AppIcon.vue'
 import type { IconName } from './icons/paths'
 
 const { activeView, setView } = useShellView()
+const { config: instanceConfig } = useInstanceConfig()
+const fixedStronghold = computed(() => instanceConfig.value?.fixed_stronghold ?? null)
 
 const tabs: { view: ShellView; label: string; icon: IconName }[] = [
   { view: 'posts', label: '帖子', icon: 'feed' },
@@ -16,8 +20,8 @@ const tabs: { view: ShellView; label: string; icon: IconName }[] = [
 
 <template>
   <nav class="mobile-nav">
-    <a class="mobile-nav__item mobile-nav__item--home" href="/" aria-label="返回 OMEW 首页" @click.prevent="navigateHome">
-      <img src="/favicon.svg" alt="" aria-hidden="true" />
+    <a v-if="!fixedStronghold" class="mobile-nav__item mobile-nav__item--home" href="/" aria-label="返回 OMEW 首页" @click.prevent="navigateHome">
+      <img :src="instanceConfig?.logo_url || '/favicon.svg'" alt="" aria-hidden="true" />
       <span class="mobile-nav__label">首页</span>
     </a>
     <button

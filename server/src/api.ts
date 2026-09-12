@@ -11,7 +11,7 @@ import type {
   RegistrationResponseJSON,
 } from "@simplewebauthn/server";
 import { base64UrlDecode, base64UrlEncode, dummyPasswordFields, hashPassword, newJti, signToken, verifyPassword, verifyToken } from "./auth";
-import { getInstanceConfig } from "./config";
+import { getInstanceBranding, getInstanceConfig } from "./config";
 import { handleInbox } from "./inbox";
 import type { EffectivePermissions } from "./permissions";
 import { canAccessRestrictedRoom, synthesizeEffectivePermissions } from "./permissions";
@@ -26,6 +26,7 @@ import {
   type RoomTokenClaims,
   type RoomType,
   type ServerRole,
+  type FixedStronghold,
   type SessionTokenClaims,
   type StrongholdTokenClaims,
   type TotpPendingTokenClaims,
@@ -73,6 +74,7 @@ const ADMIN_CONFIG_ALLOWED_FIELDS = new Set([
 ] as const);
 const STAR_DUST_SSO_ISSUER = "stardustinfinity.top";
 const STAR_DUST_SSO_AUDIENCE = "omew.stardustinfinity.top";
+const FIXED_STRONGHOLD_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 export type AdminConfigEnvField =
   | "ALLOW_ROOT"
   | "ROOT_REQUIREMENTS"
@@ -328,6 +330,34 @@ function errorResponse(status: number, code: string, message: string): Response 
 // `{error:{code,message}}` shape used by the older routes above.
 function apiError(status: number, code: string): Response {
   return json({ error: code }, status);
+}
+
+function getFixedStronghold(env: Env): FixedStronghold | null {
+  const value = env.FIXED_STRONGHOLD?.trim();
+  if (!value) return null;
+  if (!FIXED_STRONGHOLD_RE.test(value)) throw new Error("invalid FIXED_STRONGHOLD");
+  return { id: value, name: value, slug: value };
+}
+
+async function ensureFixedStronghold(env: Env): Promise<FixedStronghold | null> {
+  const fixed = getFixedStronghold(env);
+  if (!fixed) return null;
+  const ownerActor = `@system:${instanceDomain(env)}`;
+  const config = await env.STRONGHOLD_DO.getByName(fixed.id).ensureConfigWithDefaults(
+    fixed.id,
+    fixed.name,
+    "public",
+    ownerActor,
+    "星尘站专属据点",
+    fixed.slug,
+  );
+  return { id: config.id, name: config.name, slug: config.slug };
+}
+
+function strongholdPathId(path: string): string | null {
+  if (path.startsWith("/api/stronghold/")) return path.split("/")[3] ?? null;
+  if (path.startsWith("/stronghold/")) return path.split("/")[2] ?? null;
+  return null;
 }
 
 type StarDustSsoClaims = {
@@ -637,6 +667,11 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
   env = withRequestInstanceDomain(env, url.hostname);
   const path = url.pathname;
   const method = request.method;
+  const fixedStronghold = await ensureFixedStronghold(env);
+  const requestedStrongholdId = strongholdPathId(path);
+  if (fixedStronghold && requestedStrongholdId && requestedStrongholdId !== fixedStronghold.id) {
+    return apiError(404, "NOT_FOUND");
+  }
 
   // ---- instance identity policy + registration/login (real user system) ---------
 
@@ -649,6 +684,8 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
       // to shape its "create stronghold" entry point; creators/peers stay admin-only.
       stronghold_creation: config.stronghold_creation_policy,
       allow_guest_browsing: config.allow_guest_browsing,
+      fixed_stronghold: fixedStronghold,
+      ...getInstanceBranding(env),
     });
   }
 
@@ -658,6 +695,11 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     return exchangeStarDustSession(body, env);
   }
 
+  const branding = getInstanceBranding(env);
+  if (!branding.emotes_enabled && (path === "/api/emotes" || path.startsWith("/api/admin/emote-packs") || path.startsWith("/api/admin/emotes/"))) {
+    return apiError(404, "FEATURE_DISABLED");
+  }
+
   // Unauthenticated public-stronghold discovery. When the policy is
   // off the endpoint itself acts not-found rather than an empty list, matching
   // "you need to be logged in" 401s used elsewhere for a disabled read path -
@@ -665,7 +707,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
   if (method === "GET" && path === "/api/directory") {
     const config = await getInstanceConfig(env);
     if (!config.allow_guest_browsing) return apiError(404, "NOT_FOUND");
-    return json({ strongholds: await listPublicDirectory(env) });
+    return json({ strongholds: await listPublicDirectory(env, fixedStronghold?.id) });
   }
 
   // URL short-name resolution, e.g. /a/<slug> - "a" is this instance's
@@ -675,6 +717,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
   const resolveMatch = match("/api/resolve/:server/:slug", path);
   if (resolveMatch && method === "GET") {
     if (resolveMatch.server !== "a") return apiError(404, "NOT_FOUND");
+    if (fixedStronghold && resolveMatch.slug !== fixedStronghold.slug) return apiError(404, "NOT_FOUND");
     const row = await env.DB.prepare("SELECT stronghold_id FROM stronghold_slug_index WHERE slug = ?")
       .bind(resolveMatch.slug!)
       .first<{ stronghold_id: string }>();
@@ -2064,6 +2107,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
   // without inventing a slug.
 
   if (method === "POST" && path === "/api/strongholds") {
+    if (fixedStronghold) return apiError(403, "STRONGHOLD_FIXED");
     const session = await requireSession(request, env);
     if (session instanceof Response) return session;
     const actor = session.actor;
@@ -2172,6 +2216,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
   // MUST NOT be able to hijack another stronghold's slug or grief their own).
   const slugMatch = match("/api/admin/strongholds/:id/slug", path);
   if (slugMatch && method === "PATCH") {
+    if (fixedStronghold && slugMatch.id === fixedStronghold.id) return apiError(403, "STRONGHOLD_FIXED");
     const gate = await requireServerRole(request, env, "admin");
     if (gate instanceof Response) return gate;
     const body = await readJsonBody(request);
@@ -2339,8 +2384,11 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
       : await env.DB.prepare("SELECT DISTINCT stronghold_id FROM stronghold_member_index WHERE actor = ? ORDER BY stronghold_id")
         .bind(actor)
         .all<{ stronghold_id: string }>();
+    const strongholdIds = fixedStronghold
+      ? [fixedStronghold.id]
+      : [...new Set(results.map((row) => row.stronghold_id))];
     const nodes = await Promise.all(
-      [...new Set(results.map((row) => row.stronghold_id))].map(async (strongholdId) => {
+      strongholdIds.map(async (strongholdId) => {
         const stub = env.STRONGHOLD_DO.getByName(strongholdId);
         const [config, rooms] = await Promise.all([stub.getConfig(), stub.listRooms()]);
         if (!config) return null;
@@ -2506,6 +2554,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
   // override. A server admin does not inherit this irreversible operation.
   m = match("/api/stronghold/:id", path);
   if (m && method === "DELETE") {
+    if (fixedStronghold) return apiError(403, "STRONGHOLD_FIXED");
     const session = await requireSession(request, env);
     if (session instanceof Response) return session;
     const strongholdId = m.id!;
@@ -2674,6 +2723,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
 
   m = match("/api/stronghold/:id/transfer", path);
   if (m && method === "POST") {
+    if (fixedStronghold) return apiError(403, "STRONGHOLD_FIXED");
     // m0-protocol §7.10: the one permission gate the server_owner/server_admin
     // overlay does NOT extend to - only the real stronghold owner or the actual
     // server_owner (not server_admin) may transfer ownership.
@@ -3843,7 +3893,8 @@ function roomBlockedForGate(
 // write paths. Pre-projection strongholds are hydrated once by slug index; later
 // reads remain one D1 query and never fan out per card.
 async function listPublicDirectory(
-  env: Env
+  env: Env,
+  onlyStrongholdId?: string,
 ): Promise<Array<{ id: string; name: string; description: string | null; avatar: string | null; cover: string | null; member_count: number; slug: string }>> {
   const { results: missing } = await env.DB.prepare(
     "SELECT stronghold_id FROM stronghold_slug_index EXCEPT SELECT stronghold_id FROM stronghold_directory_index"
@@ -3859,5 +3910,5 @@ async function listPublicDirectory(
     "INNER JOIN stronghold_slug_index AS slugs ON slugs.stronghold_id = directory.stronghold_id " +
     "WHERE directory.visibility = 'public' ORDER BY directory.name COLLATE NOCASE, directory.stronghold_id"
   ).all<{ id: string; name: string; description: string | null; avatar: string | null; cover: string | null; member_count: number; slug: string }>();
-  return results;
+  return onlyStrongholdId ? results.filter((entry) => entry.id === onlyStrongholdId) : results;
 }

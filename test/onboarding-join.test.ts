@@ -51,7 +51,7 @@ describe('首次登录据点选择', () => {
   it('公开预览隐藏写入口，并允许已登录用户直接加入当前据点', () => {
     expect(chatPane).toContain('const canParticipate = computed(() => auth.isAuthenticated.value && !isReadOnly.value)')
     expect(leftColumn).toContain('v-if="postRoom && canParticipate"')
-    expect(postModal).toContain(':can-toggle="canParticipate"')
+    expect(postModal).toContain(':can-toggle="reactionsEnabled && canParticipate"')
     expect(rightColumn).toContain('v-else-if="isPublicPreview"')
     expect(rightColumn).toContain('@click="joinCurrentStronghold"')
     expect(rightColumn).toContain('await api.joinStronghold(auth.token.value, selectedNodeId.value)')

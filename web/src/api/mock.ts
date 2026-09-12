@@ -811,6 +811,10 @@ export const mockApi = {
       root_requirements: config.root_requirements,
       stronghold_creation: config.stronghold_creation_policy,
       allow_guest_browsing: config.allow_guest_browsing,
+      fixed_stronghold: null,
+      logo_url: null,
+      emotes_enabled: true,
+      reactions_enabled: true,
     })
   },
 

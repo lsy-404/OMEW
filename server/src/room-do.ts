@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { verifyToken } from "./auth";
+import { getInstanceBranding } from "./config";
 import { markdownPreview } from "./markdown-preview";
 import { featurePaused, type EditConfigSnapshot, type FeatureRestrictionSnapshot, type MemberRevokePayload } from "./stronghold-do";
 import {
@@ -577,6 +578,10 @@ export class RoomDO extends DurableObject<Env> {
   // bits. Rate limiting is already applied once per frame in webSocketMessage
   // above (shared actor bucket), so this handler doesn't take a token itself.
   private handleItemReaction(ws: WebSocket, attachment: Attachment, frame: Record<string, unknown>): void {
+    if (!getInstanceBranding(this.env).reactions_enabled) {
+      this.sendError(ws, "OMEW_FEATURE_DISABLED", "reactions are disabled");
+      return;
+    }
     const rawTargetSeq = frame.target_seq;
     const rawName = frame.name;
     const op = frame.op;

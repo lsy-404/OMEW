@@ -1,7 +1,9 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import type { PostSummary } from '../api/types'
 import { useAuth } from '../composables/useAuth'
 import { usePostModal } from '../composables/usePostModal'
+import { useInstanceConfig } from '../composables/useInstanceConfig'
 import { useStronghold } from '../composables/useStronghold'
 import { useStrongholdMembers } from '../composables/useStrongholdMembers'
 import { actorLocalpart } from '../utils/actor'
@@ -15,6 +17,8 @@ const { open } = usePostModal()
 const { members } = useStrongholdMembers()
 const { isReadOnly } = useStronghold()
 const auth = useAuth()
+const { config: instanceConfig } = useInstanceConfig()
+const reactionsEnabled = computed(() => instanceConfig.value?.reactions_enabled !== false)
 
 const authorName = () => members.value.find((m) => m.actor === props.post.actor)?.display_name ?? actorLocalpart(props.post.actor)
 const authorAvatar = () => members.value.find((m) => m.actor === props.post.actor)?.avatar ?? undefined
@@ -38,8 +42,8 @@ function formatTime(ts: number): string {
     <div class="post-card__body">
       <h3 class="post-card__title">{{ post.title }}</h3>
       <p class="post-card__preview">{{ post.preview }}</p>
-      <div v-if="post.reactions?.entries.length" class="post-card__reactions" @click.stop>
-        <ReactionChips :reactions="post.reactions" :can-toggle="auth.isAuthenticated.value && !isReadOnly" @toggle="emit('toggle-reaction', $event)" />
+      <div v-if="reactionsEnabled && post.reactions?.entries.length" class="post-card__reactions" @click.stop>
+        <ReactionChips :reactions="post.reactions" :can-toggle="reactionsEnabled && auth.isAuthenticated.value && !isReadOnly" @toggle="emit('toggle-reaction', $event)" />
       </div>
       <div class="post-card__meta">
         <span class="post-card__author-group">

@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { useAuth } from '../composables/useAuth'
 import { navigateHome } from '../composables/useRoute'
+import { useInstanceConfig } from '../composables/useInstanceConfig'
 import { useStronghold } from '../composables/useStronghold'
 import CreateStrongholdCard from './CreateStrongholdCard.vue'
 import DirectoryModal from './DirectoryModal.vue'
@@ -9,11 +10,19 @@ import AppIcon from './icons/AppIcon.vue'
 
 const auth = useAuth()
 const { nodes, selectedNodeId, selectNode } = useStronghold()
+const { config: instanceConfig } = useInstanceConfig()
+const fixedStronghold = computed(() => instanceConfig.value?.fixed_stronghold ?? null)
 const showCreate = ref(false)
 const showDirectory = ref(false)
 
 function onCreated() {
   showCreate.value = false
+}
+
+function handleLogoClick(event: MouseEvent) {
+  if (fixedStronghold.value) return
+  event.preventDefault()
+  navigateHome()
 }
 </script>
 
@@ -21,12 +30,12 @@ function onCreated() {
   <nav class="node-rail">
     <a
       class="node-rail__logo"
-      href="/"
-      title="返回 OMEW 首页"
-      aria-label="返回 OMEW 首页"
-      @click.prevent="navigateHome"
+      :href="fixedStronghold ? `/a/${encodeURIComponent(fixedStronghold.slug)}` : '/'"
+      :title="fixedStronghold ? `返回 ${fixedStronghold.name}` : '返回 OMEW 首页'"
+      :aria-label="fixedStronghold ? `返回 ${fixedStronghold.name}` : '返回 OMEW 首页'"
+      @click="handleLogoClick"
     >
-      <img src="/favicon.svg" alt="" aria-hidden="true" />
+      <img :src="instanceConfig?.logo_url || '/favicon.svg'" alt="" aria-hidden="true" />
     </a>
     <ul class="node-rail__list">
       <li v-for="node in nodes" :key="node.id">
@@ -43,12 +52,12 @@ function onCreated() {
           <span v-else>{{ node.name.slice(0, 1) }}</span>
         </button>
       </li>
-      <li v-if="auth.isAuthenticated.value">
+      <li v-if="auth.isAuthenticated.value && !fixedStronghold">
         <button class="node-rail__item node-rail__item--add" type="button" title="发现据点" aria-label="发现据点" @click="showDirectory = true">
           <AppIcon name="compass" :size="18" />
         </button>
       </li>
-      <li v-if="auth.isAuthenticated.value">
+      <li v-if="auth.isAuthenticated.value && !fixedStronghold">
         <button class="node-rail__item node-rail__item--add" type="button" title="创建据点" aria-label="创建据点" @click="showCreate = true">
           <AppIcon name="add" :size="18" />
         </button>

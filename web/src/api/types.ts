@@ -1,6 +1,12 @@
 export type RootRequirement = 'email' | 'phone' | 'code'
 export type StrongholdCreationPolicy = 'open' | 'restricted' | 'application'
 
+export interface FixedStronghold {
+  id: string
+  name: string
+  slug: string
+}
+
 // server-level role (m0-protocol §7.10, migration 0008) - distinct from a
 // per-stronghold StrongholdRole. 'owner' is the unique, non-transferable
 // bootstrap account; 'admin' is appointed by the owner (task 035).
@@ -16,6 +22,10 @@ export interface InstanceConfig {
   root_requirements: RootRequirement[]
   stronghold_creation: StrongholdCreationPolicy
   allow_guest_browsing: boolean
+  fixed_stronghold: FixedStronghold | null
+  logo_url: string | null
+  emotes_enabled: boolean
+  reactions_enabled: boolean
 }
 
 // /api/admin/instance/config - mirrors the server's internal InstanceConfig
