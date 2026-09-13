@@ -13,3 +13,6 @@
 - 2026-09-12：扩大管理端 alias 投影后，10 个目标测试文件共 60 项通过；类型检查发现 mock 缺少新增 `username` 字段并已补齐。
 - 2026-09-12：补齐 mock 后，`npm run typecheck` 与 `npm run build` 再次通过；完整 `npm test` 为 75 个测试文件、494 项测试全部通过。
 - 2026-09-12：`npm run deploy:check --workspace server` 通过，Worker dry-run 读取 45 个静态文件并完成绑定校验；`git diff --check` 与新增行违规词扫描均通过。
+- 2026-09-12：提交 `9d19532` 快进合并到 OMEW `main` 并推送远端；远端 Verify 工作流成功。
+- 2026-09-12：在主线 worktree 重新构建；首次部署因旧依赖目录无法解析 `jose` 失败，随后按 lockfile 执行 `npm ci` 并成功部署 `stardust-omew` 版本 `dfe4fe6a-ea4c-47bd-b193-39f81e0895d8`。
+- 2026-09-12：线上配置返回 required SSO 且会话锁定；登出接口返回 `403 LOGOUT_DISABLED`；OIDC start 返回到 StarDust authorize；线上历史身份的可见 username 统计无缺失、无 `sso-` 前缀。

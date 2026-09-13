@@ -12,3 +12,5 @@
 - [类型检查首次失败] -> 在新 worktree 执行 `npm run typecheck` -> `npm ci` 后缺少 Wrangler 生成的 `server/worker-configuration.d.ts`，导致 Env、Workers runtime 类型批量缺失；运行仓库既有 `npm run types --workspace server` 后类型检查通过，不是实现缺陷。
 - [依赖审计提示] -> `npm ci` -> npm 报告 4 个 high severity 漏洞；这是当前 lockfile 的既有依赖状态，本任务未执行会产生破坏性升级的 `npm audit fix --force`。
 - [别名投影类型失败] -> 扩展 `AdminUserEntry` 后运行类型检查 -> mock 管理用户列表仍只返回内部 `localpart`；补充与真实 API 相同的 `username` 投影后恢复类型一致性。
+- [主线 worktree 首次部署无法解析 `jose`] -> [核对构建与依赖状态] -> [该 worktree 的依赖安装早于当前 lockfile；执行 `npm ci` 后使用同一提交重新部署成功，源码和锁文件无需修改]
+- [线上验收] -> [查询公开实例配置、登出接口、OIDC start 与 D1 身份统计] -> [`sso_session_locked=true`，登出返回 `403 LOGOUT_DISABLED`，OIDC 自动入口重定向到 StarDust `/oauth/authorize`，历史身份无缺失或带前缀的可见 username]
