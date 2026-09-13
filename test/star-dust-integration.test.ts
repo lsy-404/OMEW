@@ -19,6 +19,10 @@ describe("OMEW authentication boundary", () => {
     expect(stardustConfig).toContain('"SSO_PROVIDER_NAME": "星尘粉丝站"');
     expect(stardustConfig).toContain('"INSTANCE_NAME": "论坛"');
     expect(stardustConfig).toContain('"EMBED_ORIGIN": "https://stardustinfinity.top"');
+    expect(stardustConfig).toContain('"PERSONAL_SETTINGS_SECTIONS": "profile,appearance"');
+    expect(stardustConfig).toContain('"ENABLE_EMOTES": "1"');
+    expect(stardustConfig).toContain('"USE_BUILTIN_EMOTES": "1"');
+    expect(stardustConfig).toContain('"USE_ART_ASSETS": "0"');
     expect(stardustConfig).toContain('"SSO_USE_PAR": "1"');
     expect(stardustConfig).toContain("global_fetch_strictly_public");
     expect(stardustConfig).not.toContain("SSO_CLIENT_SECRET");

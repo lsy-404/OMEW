@@ -36,6 +36,7 @@
     "FEDERATION_PEERS": "",
     "STRONGHOLD_CREATION": "restricted",
     "STRONGHOLD_CREATORS": "",
+    "PERSONAL_SETTINGS_SECTIONS": "profile,appearance",
     "INSTANCE_LOGO_URL": "https://stardustinfinity.top/favicon.svg",
     "ENABLE_EMOTES": "1",
     "USE_BUILTIN_EMOTES": "1",

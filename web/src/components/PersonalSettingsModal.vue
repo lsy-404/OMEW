@@ -3,9 +3,10 @@ import { startRegistration } from '@simplewebauthn/browser'
 import QRCode from 'qrcode'
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { api, ApiRequestError } from '../api'
-import type { Passkey } from '../api/types'
+import type { Passkey, PersonalSettingsSection } from '../api/types'
 import { useAuth } from '../composables/useAuth'
 import { useGifPlayback, type GifPlaybackMode } from '../composables/useGifPlayback'
+import { useInstanceConfig } from '../composables/useInstanceConfig'
 import { useTheme, type ThemeMode } from '../composables/useTheme'
 import { envelopeToCiphertextField, parseOwnershipEnvelope, resealOwnershipKey, unsealOwnershipKey } from '../crypto/ownershipKey'
 import { passwordError, requiredError, requiredMaxLengthError } from '../utils/validate'
@@ -22,6 +23,7 @@ const props = defineProps<{ open: boolean }>()
 const emit = defineEmits<{ close: [] }>()
 
 const auth = useAuth()
+const { config: instanceConfig } = useInstanceConfig()
 const { mode, setMode } = useTheme()
 const { mode: gifPlaybackMode, setMode: setGifPlaybackMode } = useGifPlayback()
 
@@ -41,16 +43,20 @@ function formatDate(ms: number): string {
 
 // ---- top-level tabs: 资料 / 安全 / 外观 ----
 
-type PanelTab = 'profile' | 'security' | 'appearance'
-const PANEL_TAB_OPTIONS: { Text: string; value: PanelTab }[] = [
+type PanelTab = PersonalSettingsSection
+const PANEL_TAB_DEFINITIONS: { Text: string; value: PanelTab }[] = [
   { Text: '资料', value: 'profile' },
   { Text: '安全', value: 'security' },
   { Text: '外观', value: 'appearance' },
 ]
+const PANEL_TAB_OPTIONS = computed(() => {
+  const enabled = new Set(instanceConfig.value?.personal_settings_sections ?? [])
+  return PANEL_TAB_DEFINITIONS.filter((option) => enabled.has(option.value))
+})
 const panelTab = ref<PanelTab>('profile')
-const panelTabSelected = computed(() => PANEL_TAB_OPTIONS.find((o) => o.value === panelTab.value))
+const panelTabSelected = computed(() => PANEL_TAB_OPTIONS.value.find((o) => o.value === panelTab.value))
 function onPanelTabSelect(item: { value: PanelTab }) {
-  panelTab.value = item.value
+  if (PANEL_TAB_OPTIONS.value.some((option) => option.value === item.value)) panelTab.value = item.value
 }
 
 // ---- 资料: display name ----
@@ -399,22 +405,27 @@ watch(
   () => props.open,
   (open) => {
     if (open) {
-      panelTab.value = 'profile'
+      panelTab.value = PANEL_TAB_OPTIONS.value[0]?.value ?? 'profile'
       resetDisplayNameForm()
       securityTab.value = 'password'
       resetPasswordForm()
       addingPasskey.value = false
       totpStep.value = 'status'
-      loadPasskeys()
+      if (PANEL_TAB_OPTIONS.value.some((option) => option.value === 'security')) void loadPasskeys()
     }
   },
 )
+watch(PANEL_TAB_OPTIONS, (options) => {
+  if (props.open && !options.some((option) => option.value === panelTab.value)) {
+    panelTab.value = options[0]?.value ?? 'profile'
+  }
+})
 </script>
 
 <template>
   <Teleport to="body">
     <Transition name="personal-modal">
-      <div v-if="open" class="personal-modal-overlay" @click.self="requestClose">
+      <div v-if="open && PANEL_TAB_OPTIONS.length" class="personal-modal-overlay" @click.self="requestClose">
         <div class="personal-modal" role="dialog" aria-modal="true" aria-label="个人设置">
           <div class="personal-modal__header">
             <h1 class="personal-modal__title">个人设置</h1>

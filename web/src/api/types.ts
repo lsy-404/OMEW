@@ -3,6 +3,7 @@ export type StrongholdCreationPolicy = 'open' | 'restricted' | 'application'
 
 export type InstanceMode = 'multi' | 'single'
 export type SsoMode = 'disabled' | 'optional' | 'required'
+export type PersonalSettingsSection = 'profile' | 'security' | 'appearance'
 
 export interface RootStronghold {
   id: string
@@ -28,6 +29,7 @@ export interface InstanceConfig {
   root_requirements: RootRequirement[]
   stronghold_creation: StrongholdCreationPolicy
   allow_guest_browsing: boolean
+  personal_settings_sections: PersonalSettingsSection[]
   sso_mode: SsoMode
   sso_enabled: boolean
   sso_provider_name: string

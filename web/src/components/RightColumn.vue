@@ -23,6 +23,7 @@ const { openAuthModal } = useAuthModal()
 
 const personalName = computed(() => auth.user.value?.display_name || auth.user.value?.username || '')
 const personalCover = computed(() => auth.user.value?.cover ?? null)
+const personalSettingsAvailable = computed(() => (instanceConfig.value?.personal_settings_sections.length ?? 0) > 0)
 
 const modeLabel: Record<string, string> = {
   system: '跟随系统',
@@ -42,14 +43,14 @@ const joinError = ref('')
 const userMenu = computed(() => ({
   Items: [
     ...(auth.isAdmin.value ? [{ Text: '服务器管理', Value: 'server-admin' }] : []),
-    { Text: '个人设置', Value: 'personal-settings' },
+    ...(personalSettingsAvailable.value ? [{ Text: '个人设置', Value: 'personal-settings' }] : []),
     ...(instanceConfig.value?.sso_session_locked ? [] : [{ Text: '登出', Value: 'logout' }]),
   ],
 }))
 
 function onUserMenuSelect(item: { Value: string }) {
   if (item.Value === 'server-admin') emit('open-server-admin')
-  else if (item.Value === 'personal-settings') showPersonalSettings.value = true
+  else if (item.Value === 'personal-settings' && personalSettingsAvailable.value) showPersonalSettings.value = true
   else if (item.Value === 'logout') auth.logout()
 }
 

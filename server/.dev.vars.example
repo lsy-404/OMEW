@@ -25,6 +25,7 @@ DEV_TOKEN_SECRET=change-me-to-a-random-value
 # file. Not secrets, just env config - parsing lives in server/src/config.ts.
 # ALLOW_ROOT=1
 # INSTANCE_MODE=multi
+# PERSONAL_SETTINGS_SECTIONS=profile,security,appearance
 # ROOT_STRONGHOLD=
 # ROOT_REQUIREMENTS=
 # TRUSTED_IDENTITY_SERVERS=*

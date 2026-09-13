@@ -124,6 +124,7 @@ export type RootRequirement = "email" | "phone" | "code";
 
 // m0-protocol §7.9: self-operated instance governance policies.
 export type StrongholdCreationPolicy = "open" | "restricted" | "application";
+export type PersonalSettingsSection = "profile" | "security" | "appearance";
 
 export interface RootStronghold {
   id: string;
@@ -145,6 +146,7 @@ export interface InstanceConfig {
   federation_peers: string[];
   stronghold_creation_policy: StrongholdCreationPolicy;
   stronghold_creators: string[];
+  personal_settings_sections: PersonalSettingsSection[];
   // Unauthenticated read-only access to public strongholds (m0-protocol
   // §8.2's "public visibility MAY serve unauthenticated reads"), gated by this
   // local policy toggle on top of the protocol's MAY. Migration 0007, default on.

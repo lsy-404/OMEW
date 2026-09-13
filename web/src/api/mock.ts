@@ -25,6 +25,7 @@ import type {
   FeatureRestrictionMode,
   FeatureRestrictions,
   InviteCode,
+  InstanceConfig,
   ItemBody,
   ItemReactions,
   LoginPayload,
@@ -821,7 +822,7 @@ export const mockApi = {
     throw new ApiRequestError('SSO_NOT_CONFIGURED', 503)
   },
 
-    async getInstanceConfig() {
+    async getInstanceConfig(): Promise<InstanceConfig> {
     return delay({
       instance_name: 'OMEW',
       instance_mode: config.instance_mode,
@@ -832,6 +833,7 @@ export const mockApi = {
       root_requirements: config.root_requirements,
       stronghold_creation: config.stronghold_creation_policy,
       allow_guest_browsing: config.allow_guest_browsing,
+      personal_settings_sections: ['profile', 'security', 'appearance'],
       sso_mode: config.sso_mode,
       sso_enabled: config.sso_mode !== 'disabled' && config.sso_client_secret_configured && !!config.sso_issuer && !!config.sso_client_id,
       sso_provider_name: config.sso_provider_name,

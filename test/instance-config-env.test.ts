@@ -25,6 +25,7 @@ describe("getInstanceConfig: defaults", () => {
       federation_peers: [],
       stronghold_creation_policy: "restricted",
       stronghold_creators: [],
+      personal_settings_sections: ["profile", "security", "appearance"],
       allow_guest_browsing: true,
     });
   });
@@ -65,6 +66,12 @@ describe("getInstanceConfig: comma-separated list parsing", () => {
     expect(getInstanceConfig(envWith({ FEDERATION_PEERS: "" })).federation_peers).toEqual([]);
     // Contrast: unset falls back to the default instead.
     expect(getInstanceConfig(envWith({})).trusted_identity_servers).toEqual(["*"]);
+  });
+
+  it("parses the available personal settings allowlist and drops duplicates or unknown values", () => {
+    expect(getInstanceConfig(envWith({ PERSONAL_SETTINGS_SECTIONS: "appearance,profile,appearance,unknown" })).personal_settings_sections)
+      .toEqual(["appearance", "profile"]);
+    expect(getInstanceConfig(envWith({ PERSONAL_SETTINGS_SECTIONS: "" })).personal_settings_sections).toEqual([]);
   });
 });
 

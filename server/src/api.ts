@@ -853,6 +853,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
       // to shape its "create stronghold" entry point; creators/peers stay admin-only.
       stronghold_creation: config.stronghold_creation_policy,
       allow_guest_browsing: config.allow_guest_browsing,
+      personal_settings_sections: config.personal_settings_sections,
       sso_mode: sso.mode,
       sso_enabled: sso.mode !== "disabled" && sso.configured,
       sso_provider_name: sso.provider_name,

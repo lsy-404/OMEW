@@ -9,7 +9,7 @@
 // read for any of these fields - the table and its columns are left in place as
 // archival/rollback-safe dead data, not dropped.
 
-import type { InstanceConfig, InstanceMode, RootRequirement, SsoMode, StrongholdCreationPolicy } from "./types";
+import type { InstanceConfig, InstanceMode, PersonalSettingsSection, RootRequirement, SsoMode, StrongholdCreationPolicy } from "./types";
 
 export interface InstanceBranding {
   instance_name: string;
@@ -83,6 +83,14 @@ function parseRootStronghold(value: string | undefined): string | null {
   return ROOT_STRONGHOLD_RE.test(root) ? root : null;
 }
 
+const PERSONAL_SETTINGS_SECTIONS: readonly PersonalSettingsSection[] = ["profile", "security", "appearance"];
+function parsePersonalSettingsSections(value: string | undefined): PersonalSettingsSection[] {
+  const requested = parseCsv(value, [...PERSONAL_SETTINGS_SECTIONS]);
+  return [...new Set(requested)].filter((section): section is PersonalSettingsSection =>
+    (PERSONAL_SETTINGS_SECTIONS as readonly string[]).includes(section)
+  );
+}
+
 const SSO_MODES: readonly SsoMode[] = ["disabled", "optional", "required"];
 function parseSsoMode(value: string | undefined): SsoMode {
   const mode = value?.trim();
@@ -132,6 +140,7 @@ export function getInstanceConfig(env: Env): InstanceConfig {
     federation_peers: parseCsv(env.FEDERATION_PEERS, []),
     stronghold_creation_policy: parseStrongholdCreation(env.STRONGHOLD_CREATION),
     stronghold_creators: parseCsv(env.STRONGHOLD_CREATORS, []),
+    personal_settings_sections: parsePersonalSettingsSections(env.PERSONAL_SETTINGS_SECTIONS),
     allow_guest_browsing: parseBool(env.ALLOW_GUEST_BROWSING, true),
   };
 }

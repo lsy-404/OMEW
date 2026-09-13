@@ -21,6 +21,7 @@ interface Env {
   INSTANCE_NAME?: string;
   EMBED_ORIGIN?: string;
   INSTANCE_LOGO_URL?: string;
+  PERSONAL_SETTINGS_SECTIONS?: string;
   ENABLE_EMOTES?: string;
   USE_BUILTIN_EMOTES?: string;
   ENABLE_REACTIONS?: string;
@@ -47,6 +48,7 @@ declare namespace Cloudflare {
     INSTANCE_NAME?: string;
     EMBED_ORIGIN?: string;
     INSTANCE_LOGO_URL?: string;
+    PERSONAL_SETTINGS_SECTIONS?: string;
     ENABLE_EMOTES?: string;
     USE_BUILTIN_EMOTES?: string;
     ENABLE_REACTIONS?: string;
