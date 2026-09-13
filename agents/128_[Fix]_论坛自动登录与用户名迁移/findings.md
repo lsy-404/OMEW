@@ -23,3 +23,4 @@
 - [修正方案] -> 评估 cookie、放宽无 Referer 与同源中转 -> 第三方 cookie 不可靠，允许无 Referer 会破坏独立访问边界；callback 在嵌入实例返回带精确 `frame-ancestors` CSP 的 200 同源中转文档，再通过 meta refresh 导航到 completion URL，可建立可信的 OMEW 文档发起者。
 - [中转安全边界] -> 检查 completion URL、响应缓存与嵌入来源 -> 目标由同源 `safeReturnTo` 构造并进行 HTML attribute 转义；响应使用 `no-store`、`nosniff`、`same-origin` referrer policy，以及只允许配置父站的 `frame-ancestors`。
 - [中转实现验证] -> 目标测试、类型检查、构建、dry-run 和受控并行全量测试 -> 目标 14 项通过，完整 75 个文件、496 项通过。
+- [真实闭环通过] -> 部署同源中转后刷新 Edge 中已有 StarDust 登录会话 -> iframe 自动完成 OIDC 并进入 `medium5`；资料与用户菜单显示 `mxjw`/`@mxjw`，菜单仅含个人设置且没有登出。
