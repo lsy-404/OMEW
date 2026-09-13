@@ -20,6 +20,8 @@ OMEW 使用标准 OIDC Authorization Code + PKCE 接入统一登录。Worker 环
 
 若只运行一个据点，可将 `INSTANCE_MODE=single` 与 `ROOT_STRONGHOLD=<据点短名>` 一起设置。该模式会把指定据点作为 `/` 的主内容，隐藏首页和据点导航栏，并拒绝其他据点的访问、创建、删除与转让；`INSTANCE_MODE=multi` 保留普通多据点首页。
 
+个人设置可用区块由 `PERSONAL_SETTINGS_SECTIONS` 的 CSV allowlist 定义，可选值为 `profile`、`security`、`appearance`；未配置时全部启用，显式空值会隐藏个人设置入口。`USE_BUILTIN_EMOTES` 与 `USE_ART_ASSETS` 相互独立，因此可保留内置表情包并关闭默认头像、背景和空状态插画。
+
 ## 文档 / Docs
 
 - [项目书 v0.2](docs/proposal-v0.2.md) —— 设计文档(架构、数据模型、联邦、成本)

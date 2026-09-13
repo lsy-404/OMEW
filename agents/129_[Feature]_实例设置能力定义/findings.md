@@ -10,3 +10,4 @@
 - [首次类型检查] -> 目标测试 20 项通过后 `vue-tsc` 报 mock 的设置 section 推断为宽泛 `string[]` -> 为 mock `getInstanceConfig` 声明 `Promise<InstanceConfig>` 返回类型，使 allowlist 使用正式联合类型。
 - [集成后首次全量测试] -> 503 项中 `stronghold-management` 的 WebSocket 测试先收到 batch 而非预期 error -> 失败路径不触及本次设置、注册或表情代码，隔离重跑以判断并发消息时序波动。
 - [隔离重跑] -> 单独执行 `stronghold-management` -> 31 项全部通过，确认首次失败为全量并行中的既有消息时序波动。
+- [最终全量验证] -> 使用 2 个 Vitest worker 降低并发干扰 -> 76 个测试文件、503 项全部通过；类型检查、构建与 Worker dry-run 通过。
