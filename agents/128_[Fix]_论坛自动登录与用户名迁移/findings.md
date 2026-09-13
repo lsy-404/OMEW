@@ -14,3 +14,8 @@
 - [别名投影类型失败] -> 扩展 `AdminUserEntry` 后运行类型检查 -> mock 管理用户列表仍只返回内部 `localpart`；补充与真实 API 相同的 `username` 投影后恢复类型一致性。
 - [主线 worktree 首次部署无法解析 `jose`] -> [核对构建与依赖状态] -> [该 worktree 的依赖安装早于当前 lockfile；执行 `npm ci` 后使用同一提交重新部署成功，源码和锁文件无需修改]
 - [线上验收] -> [查询公开实例配置、登出接口、OIDC start 与 D1 身份统计] -> [`sso_session_locked=true`，登出返回 `403 LOGOUT_DISABLED`，OIDC 自动入口重定向到 StarDust `/oauth/authorize`，历史身份无缺失或带前缀的可见 username]
+- [真实浏览器阻塞] -> Edge 从主站 `/omew` 自动发起 OIDC 后停在 `omew.stardustinfinity.top/#sso_complete=...`，正文为“此论坛仅在星尘粉丝站内提供” -> callback 动态路由本身不受静态文档门禁限制，但它返回的同源根文档仍携带 `Sec-Fetch-Dest: iframe`；当前 iframe 分支只接受父站 Referer，错误拒绝了 OMEW callback 之后的同源续航。
+- [安全边界] -> 对比嵌入初始请求、OIDC completion 续航和地址栏直开请求头 -> 允许 `iframe + Referer=EMBED_ORIGIN` 的初始嵌入，以及 `iframe + Sec-Fetch-Site=same-origin + Referer origin=request origin` 的同源续航；继续拒绝 `document + Sec-Fetch-Site=none` 的地址栏打开。
+- [修复后首次全量测试] -> 75 个文件并行运行时 `server-role` 与 `stronghold-deletion` 各有 1 项超过 5 秒 -> 两项均不触及本次认证或嵌入门禁代码，目标认证测试已通过；单独重跑失败文件以区分资源竞争和真实回归。
+- [隔离重跑] -> 单独运行两个超时文件 -> 2 个文件、18 项全部通过，确认首次失败来自全量并行资源竞争；随后限制 worker 数重新运行完整套件。
+- [最终验证] -> 将 Vitest worker 限制为 4 后重跑完整套件 -> 75 个测试文件、495 项全部通过；类型检查、前端构建和 Worker dry-run 同步通过。

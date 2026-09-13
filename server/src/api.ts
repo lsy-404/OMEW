@@ -446,25 +446,30 @@ function webauthnOrigin(env: Env): string {
 
 const RES_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
-function requestOrigin(value: string | null): string | null {
+function requestUrl(value: string | null): URL | null {
   if (!value) return null;
   try {
-    return new URL(value).origin;
+    return new URL(value);
   } catch {
     return null;
   }
 }
 
 function isAllowedEmbeddedDocument(request: Request, embedOrigin: string): boolean {
-  const refererOrigin = requestOrigin(request.headers.get("Referer"));
+  const referer = requestUrl(request.headers.get("Referer"));
+  const requestOrigin = new URL(request.url).origin;
   const destination = request.headers.get("Sec-Fetch-Dest")?.toLowerCase() ?? "";
-  if (destination === "iframe") return refererOrigin === embedOrigin;
+  if (destination === "iframe") {
+    if (referer?.origin === embedOrigin) return true;
+    if (referer?.origin !== requestOrigin) return false;
+    return request.headers.get("Sec-Fetch-Site") === "same-origin" || referer.pathname === "/api/auth/oidc/callback";
+  }
   if (destination === "document") {
-    return request.headers.get("Sec-Fetch-Site") === "same-origin" && refererOrigin === new URL(request.url).origin;
+    return request.headers.get("Sec-Fetch-Site") === "same-origin" && referer?.origin === requestOrigin;
   }
   // Safari does not consistently send Fetch Metadata. The parent origin is
   // still present on the initial cross-origin iframe request.
-  return !destination && refererOrigin === embedOrigin;
+  return !destination && referer?.origin === embedOrigin;
 }
 
 function isDynamicPath(path: string): boolean {

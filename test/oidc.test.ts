@@ -7,6 +7,7 @@ import {
   consumeOidcLoginCompletion,
   finishOidcAuthorization,
   mapOidcIdentity,
+  oidcLoginCompletionRedirect,
 } from "../server/src/oidc";
 import { getSsoConfig } from "../server/src/config";
 import { apiRequest, ensureMigrated, sessionToken } from "./helpers";
@@ -133,6 +134,18 @@ describe("OMEW OIDC client", () => {
     const completion = await createOidcLoginCompletion(env, first.localpart);
     expect(await consumeOidcLoginCompletion(env, completion)).toBe(first.localpart);
     expect(await consumeOidcLoginCompletion(env, completion)).toBeNull();
+  });
+
+  it("preserves a same-origin referrer for the completion document navigation", () => {
+    const response = oidcLoginCompletionRedirect(
+      new Request("http://localhost/api/auth/oidc/callback"),
+      env,
+      "/",
+      "completion-code",
+    );
+    expect(response.status).toBe(302);
+    expect(response.headers.get("Referrer-Policy")).toBe("same-origin");
+    expect(response.headers.get("Location")).toBe("http://localhost/#sso_complete=completion-code");
   });
 
   it("uses the provider username as the new local username and rejects collisions", async () => {

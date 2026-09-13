@@ -9,3 +9,9 @@
 - [x] 运行目标测试、类型检查、构建及必要的完整测试
 - [x] 检查 diff、更新审计记录并提交独立分支
 - [x] 合并主线、部署 StarDust 专属实例并复验线上登录、登出和用户名状态
+- [x] 复现 OIDC callback 后 iframe 同源根文档导航被门禁拒绝的问题
+- [x] 允许 iframe 内从 OMEW 同源页面继续导航，同时保持地址栏独立打开拒绝
+- [x] 确保 OIDC completion 重定向保留同源 Referer
+- [x] 增加 callback/completion 导航请求头组合的 Worker 回归测试
+- [x] 运行目标测试、完整测试、类型检查、构建和 Worker dry-run
+- [x] 执行 diff/违规词检查，更新审计并提交修复

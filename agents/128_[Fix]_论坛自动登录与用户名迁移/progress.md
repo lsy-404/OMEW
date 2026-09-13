@@ -16,3 +16,10 @@
 - 2026-09-12：提交 `9d19532` 快进合并到 OMEW `main` 并推送远端；远端 Verify 工作流成功。
 - 2026-09-12：在主线 worktree 重新构建；首次部署因旧依赖目录无法解析 `jose` 失败，随后按 lockfile 执行 `npm ci` 并成功部署 `stardust-omew` 版本 `dfe4fe6a-ea4c-47bd-b193-39f81e0895d8`。
 - 2026-09-12：线上配置返回 required SSO 且会话锁定；登出接口返回 `403 LOGOUT_DISABLED`；OIDC start 返回到 StarDust authorize；线上历史身份的可见 username 统计无缺失、无 `sso-` 前缀。
+- 2026-09-12：真实 Edge 验收捕获 OIDC completion 根文档被 embed-only 门禁拒绝；fetch 后将分支从 `9d19532` fast-forward 到包含线上审计的 `origin/main` (`1fab29c`)。
+- 2026-09-12：核对门禁请求头分支，确认 iframe 同源续航未被允许；记录保持地址栏直开拒绝的最小修复条件。
+- 2026-09-12：允许 OIDC callback 发出的 iframe 同源续航请求，并让 completion redirect 使用 `same-origin` referrer policy；地址栏 `document + none` 规则保持拒绝。
+- 2026-09-12：新增 callback completion 请求头组合回归测试；2 个目标测试文件、13 项通过。
+- 2026-09-12：类型检查、前端构建与 Worker dry-run 通过；首次全量 495 项中 2 项无关 DO 测试超过 5 秒，进入隔离重跑。
+- 2026-09-12：隔离重跑两个超时测试文件，18 项全部通过；准备以较低并行度再次运行全量套件。
+- 2026-09-12：使用 4 个 Vitest worker 重跑完整套件，75 个文件、495 项全部通过；完成 diff 与新增行违规词检查并准备提交线上闭环修复。

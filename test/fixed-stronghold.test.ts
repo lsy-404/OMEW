@@ -116,7 +116,7 @@ describe("single stronghold instance mode", () => {
     env.ENABLE_EMOTES = undefined;
   });
 
-  it("allows the StarDust iframe while rejecting direct document navigation", async () => {
+  it("allows iframe entry and OIDC completion while rejecting direct document navigation", async () => {
     const embedded = await worker.fetch(new Request("https://omew.stardustinfinity.top/", {
       headers: {
         Referer: "https://stardustinfinity.top/",
@@ -125,6 +125,33 @@ describe("single stronghold instance mode", () => {
       },
     }), env);
     expect(embedded.status).not.toBe(403);
+
+    const sameOriginContinuation = await worker.fetch(new Request("https://omew.stardustinfinity.top/", {
+      headers: {
+        Referer: "https://omew.stardustinfinity.top/api/auth/oidc/callback?code=example&state=example",
+        "Sec-Fetch-Dest": "iframe",
+        "Sec-Fetch-Site": "same-origin",
+      },
+    }), env);
+    expect(sameOriginContinuation.status).not.toBe(403);
+
+    const crossSiteCallbackContinuation = await worker.fetch(new Request("https://omew.stardustinfinity.top/", {
+      headers: {
+        Referer: "https://omew.stardustinfinity.top/api/auth/oidc/callback?code=example&state=example",
+        "Sec-Fetch-Dest": "iframe",
+        "Sec-Fetch-Site": "cross-site",
+      },
+    }), env);
+    expect(crossSiteCallbackContinuation.status).not.toBe(403);
+
+    const unrelatedCrossSiteContinuation = await worker.fetch(new Request("https://omew.stardustinfinity.top/", {
+      headers: {
+        Referer: "https://omew.stardustinfinity.top/unrelated",
+        "Sec-Fetch-Dest": "iframe",
+        "Sec-Fetch-Site": "cross-site",
+      },
+    }), env);
+    expect(unrelatedCrossSiteContinuation.status).toBe(403);
 
     const direct = await worker.fetch(new Request("https://omew.stardustinfinity.top/", {
       headers: { "Sec-Fetch-Dest": "document", "Sec-Fetch-Site": "none" },

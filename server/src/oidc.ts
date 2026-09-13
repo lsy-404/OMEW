@@ -388,12 +388,12 @@ async function signedRequestObject(config: SsoRuntimeConfig, parameters: URLSear
     .sign(await importJWK(jwk as never, metadata.alg || "RS256"));
 }
 
-function redirect(location: string, setCookie?: string): Response {
+function redirect(location: string, setCookie?: string, referrerPolicy: "no-referrer" | "same-origin" = "no-referrer"): Response {
   const headers = new Headers({
     Location: location,
     "Cache-Control": "no-store",
     Pragma: "no-cache",
-    "Referrer-Policy": "no-referrer",
+    "Referrer-Policy": referrerPolicy,
   });
   if (setCookie) headers.append("Set-Cookie", setCookie);
   return new Response(null, { status: 302, headers });
@@ -966,5 +966,5 @@ export async function consumeOidcLoginCompletionDetails(env: Env, code: string):
 export function oidcLoginCompletionRedirect(request: Request, env: Env, returnTo: string, code: string): Response {
   const destination = new URL(safeReturnTo(returnTo), trustedRequestOrigin(request, env));
   destination.hash = new URLSearchParams({ sso_complete: code }).toString();
-  return redirect(destination.toString(), clearOidcTransactionCookie(request));
+  return redirect(destination.toString(), clearOidcTransactionCookie(request), "same-origin");
 }
