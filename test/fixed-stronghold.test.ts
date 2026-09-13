@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
-import worker from "../server/src/api";
+import worker, { ensureRegisteredActorInSingleStronghold } from "../server/src/api";
+import { getInstanceConfig } from "../server/src/config";
+import { mapOidcIdentity } from "../server/src/oidc";
 import { typeToKind } from "../server/src/types";
 import { ensureMigrated, loginAs, registerUser } from "./helpers";
 
@@ -114,6 +116,68 @@ describe("single stronghold instance mode", () => {
     expect(response.status).toBe(404);
     expect(await response.json()).toEqual({ error: "FEATURE_DISABLED" });
     env.ENABLE_EMOTES = undefined;
+  });
+
+  it("adds a local registration to the configured root before returning success", async () => {
+    const response = await apiRequest("/api/register", {
+      method: "POST",
+      body: JSON.stringify({
+        username: "singlelocaljoin",
+        password: "password123",
+        ownership_pubkey: "test-pubkey",
+        ownership_ciphertext: "test-ciphertext",
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    const registered = await response.clone().json() as { token: string };
+    const stronghold = env.STRONGHOLD_DO.getByName("root-id");
+    expect(await stronghold.getMember("@singlelocaljoin:local")).toMatchObject({
+      actor: "@singlelocaljoin:local",
+      role: "member",
+    });
+    const mine = await apiRequest("/api/me/strongholds", {
+      headers: { Authorization: `Bearer ${registered.token}` },
+    });
+    expect(await mine.json() as Array<{ id: string }>)
+      .toContainEqual(expect.objectContaining({ id: "root-id" }));
+  });
+
+  it("uses the same idempotent membership path for an OIDC first registration", async () => {
+    const mapped = await mapOidcIdentity(env, {
+      issuer: "https://single-oidc.example",
+      subject: "single-oidc-subject",
+      username: "singleoidcjoin",
+      display_name: "Single OIDC Join",
+      email: null,
+      email_verified: false,
+    });
+    const actor = `@${mapped.localpart}:local`;
+    const config = getInstanceConfig(env);
+    const root = { id: "root-id", name: "Configured root", slug: "medium5" };
+
+    expect(await ensureRegisteredActorInSingleStronghold(env, config, root, actor)).toBeNull();
+    expect(await ensureRegisteredActorInSingleStronghold(env, config, root, actor)).toBeNull();
+
+    const members = await env.STRONGHOLD_DO.getByName("root-id").listMembers();
+    expect(members.filter((member) => member.actor === actor)).toHaveLength(1);
+  });
+
+  it("does not return a registered account when a single instance has no usable root", async () => {
+    env.ROOT_STRONGHOLD = "";
+    const response = await apiRequest("/api/register", {
+      method: "POST",
+      body: JSON.stringify({
+        username: "rootmissingjoin",
+        password: "password123",
+        ownership_pubkey: "test-pubkey",
+        ownership_ciphertext: "test-ciphertext",
+      }),
+    });
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: "INSTANCE_ROOT_NOT_CONFIGURED" });
+    expect(await env.DB.prepare("SELECT localpart FROM users WHERE localpart = ?").bind("rootmissingjoin").first()).toBeNull();
+    env.ROOT_STRONGHOLD = "medium5";
   });
 
   it("allows iframe entry and OIDC completion while rejecting direct document navigation", async () => {

@@ -537,6 +537,26 @@ async function ensureRootStronghold(env: Env, rootSlug: string | null): Promise<
   return { id: config.id, name: config.name, slug: config.slug };
 }
 
+export async function ensureRegisteredActorInSingleStronghold(
+  env: Env,
+  config: ReturnType<typeof getInstanceConfig>,
+  rootStronghold: RootStronghold | null,
+  actor: string,
+): Promise<Response | null> {
+  if (config.instance_mode !== "single") return null;
+  if (!rootStronghold) return apiError(503, config.root_stronghold ? "INSTANCE_ROOT_NOT_FOUND" : "INSTANCE_ROOT_NOT_CONFIGURED");
+
+  try {
+    const stub = env.STRONGHOLD_DO.getByName(rootStronghold.id);
+    const existing = await stub.getMember(actor);
+    if (existing) return existing.banned_at ? apiError(403, "FORBIDDEN") : null;
+    await stub.addMember(actor, "member", 0, false);
+    return null;
+  } catch {
+    return apiError(503, "INSTANCE_ROOT_MEMBERSHIP_UNAVAILABLE");
+  }
+}
+
 function strongholdPathId(path: string): string | null {
   if (path.startsWith("/api/stronghold/")) return path.split("/")[3] ?? null;
   if (path.startsWith("/api/admin/strongholds/")) return path.split("/")[4] ?? null;
@@ -880,6 +900,13 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
       const result = await finishOidcAuthorization(request, env, sso);
       const mapped = await mapOidcIdentity(env, result.identity);
       if (mapped.status !== "active") return apiError(403, "ACCOUNT_DISABLED");
+      const membershipError = await ensureRegisteredActorInSingleStronghold(
+        env,
+        instanceConfig,
+        rootStronghold,
+        `@${mapped.localpart}:${instanceDomain(env)}`,
+      );
+      if (membershipError) return membershipError;
       const completion = await createOidcLoginCompletion(env, mapped.localpart, sso, result.tokens);
       return oidcLoginCompletionRedirect(request, env, result.return_to, completion);
     } catch (error) {
@@ -1090,6 +1117,15 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
       return apiError(400, "INVITE_INVALID");
     }
     const serverRole: ServerRole = results[ownerBootstrapIndex]!.meta.changes === 1 ? "owner" : "user";
+
+    const membershipError = await ensureRegisteredActorInSingleStronghold(env, config, rootStronghold, actor);
+    if (membershipError) {
+      await env.DB.prepare("DELETE FROM users WHERE localpart = ?").bind(username).run();
+      if (requiresCode) {
+        await env.DB.prepare("UPDATE invite_codes SET used_by = NULL, used_at = NULL WHERE used_by = ?").bind(username).run();
+      }
+      return membershipError;
+    }
 
     let token: string;
     try {
