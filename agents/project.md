@@ -27,3 +27,5 @@ TypeScript、Hono/Workers、Vue 3/Vite、Wrangler、Vitest。
 - [任务 126 StarDust 实例 SSO 部署](126_[Feature]_StarDust实例SSO部署/)
 - [任务 128 论坛自动登录与用户名迁移](128_[Fix]_论坛自动登录与用户名迁移/)
 - [任务 129 实例设置能力定义](129_[Feature]_实例设置能力定义/)
+- [任务 130 单据点注册自动加入](130_[Feature]_单据点注册自动加入/)
+- [任务 131 内置表情与内置美术资源解耦](131_[Fix]_内置表情与内置美术资源解耦/)

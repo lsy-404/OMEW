@@ -36,6 +36,7 @@ describe("single stronghold web contract", () => {
     expect(chatPane).toContain("reactionsEnabled")
     expect(postModal).toContain("reactionsEnabled")
     expect(useEmotes).toContain("builtin_emotes_enabled")
+    expect(useEmotes).not.toContain("art_assets_enabled")
     expect(landingPage).toContain("v-if=\"artAssetsEnabled\"")
     expect(emptyState).toContain("v-if=\"image\"")
     expect(indexHtml).not.toContain('rel="icon"')

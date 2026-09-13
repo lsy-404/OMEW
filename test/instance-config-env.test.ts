@@ -70,7 +70,7 @@ describe("getInstanceConfig: comma-separated list parsing", () => {
 
   it("parses the available personal settings allowlist and drops duplicates or unknown values", () => {
     expect(getInstanceConfig(envWith({ PERSONAL_SETTINGS_SECTIONS: "appearance,profile,appearance,unknown" })).personal_settings_sections)
-      .toEqual(["appearance", "profile"]);
+      .toEqual(["profile", "appearance"]);
     expect(getInstanceConfig(envWith({ PERSONAL_SETTINGS_SECTIONS: "" })).personal_settings_sections).toEqual([]);
   });
 });

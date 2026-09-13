@@ -85,10 +85,8 @@ function parseRootStronghold(value: string | undefined): string | null {
 
 const PERSONAL_SETTINGS_SECTIONS: readonly PersonalSettingsSection[] = ["profile", "security", "appearance"];
 function parsePersonalSettingsSections(value: string | undefined): PersonalSettingsSection[] {
-  const requested = parseCsv(value, [...PERSONAL_SETTINGS_SECTIONS]);
-  return [...new Set(requested)].filter((section): section is PersonalSettingsSection =>
-    (PERSONAL_SETTINGS_SECTIONS as readonly string[]).includes(section)
-  );
+  const requested = new Set(parseCsv(value, [...PERSONAL_SETTINGS_SECTIONS]));
+  return PERSONAL_SETTINGS_SECTIONS.filter((section) => requested.has(section));
 }
 
 const SSO_MODES: readonly SsoMode[] = ["disabled", "optional", "required"];
