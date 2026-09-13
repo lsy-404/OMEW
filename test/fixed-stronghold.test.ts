@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
 import worker from "../server/src/api";
 import { typeToKind } from "../server/src/types";
-import { ensureMigrated } from "./helpers";
+import { ensureMigrated, loginAs, registerUser } from "./helpers";
 
 function apiRequest(path: string, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers);
@@ -158,6 +158,41 @@ describe("single stronghold instance mode", () => {
     }), env);
     expect(direct.status).toBe(403);
     expect(await direct.text()).toContain("仅在星尘粉丝站内提供");
+  });
+
+  it("keeps builtin emotes enabled when art assets are disabled for StarDust", async () => {
+    env.ENABLE_EMOTES = "1";
+    env.USE_BUILTIN_EMOTES = "1";
+    env.USE_ART_ASSETS = "0";
+
+    try {
+      const configResponse = await apiRequest("/api/instance/config");
+      expect(configResponse.status).toBe(200);
+      expect(await configResponse.json()).toMatchObject({
+        emotes_enabled: true,
+        builtin_emotes_enabled: true,
+        art_assets_enabled: false,
+      });
+
+      const username = `stardust-emoji-${Date.now()}`;
+      const registerResponse = await registerUser({
+        username,
+        password: "password123",
+        ownership_pubkey: "test-pubkey",
+        ownership_ciphertext: "test-ciphertext-blob",
+      });
+      expect(registerResponse.status).toBe(200);
+      const token = await loginAs(username);
+      const emotesResponse = await apiRequest("/api/emotes", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(emotesResponse.status).toBe(200);
+      expect((await emotesResponse.json()).packs).toEqual(expect.any(Array));
+    } finally {
+      env.ENABLE_EMOTES = undefined;
+      env.USE_BUILTIN_EMOTES = undefined;
+      env.USE_ART_ASSETS = undefined;
+    }
   });
 
   it("locks logout for the embedded required-SSO forum", async () => {

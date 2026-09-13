@@ -11,9 +11,8 @@ let loaded = false
 const { config: instanceConfig } = useInstanceConfig()
 const enabled = computed(() => instanceConfig.value?.emotes_enabled !== false)
 const builtinEnabled = computed(
-  () => enabled.value && instanceConfig.value?.builtin_emotes_enabled !== false && artAssetsEnabled.value,
+  () => enabled.value && instanceConfig.value?.builtin_emotes_enabled !== false,
 )
-const artAssetsEnabled = computed(() => instanceConfig.value?.art_assets_enabled !== false)
 
 async function loadEmotes() {
   const auth = useAuth()
