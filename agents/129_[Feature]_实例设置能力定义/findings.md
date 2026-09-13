@@ -11,3 +11,6 @@
 - [集成后首次全量测试] -> 503 项中 `stronghold-management` 的 WebSocket 测试先收到 batch 而非预期 error -> 失败路径不触及本次设置、注册或表情代码，隔离重跑以判断并发消息时序波动。
 - [隔离重跑] -> 单独执行 `stronghold-management` -> 31 项全部通过，确认首次失败为全量并行中的既有消息时序波动。
 - [最终全量验证] -> 使用 2 个 Vitest worker 降低并发干扰 -> 76 个测试文件、503 项全部通过；类型检查、构建与 Worker dry-run 通过。
+- [新增用户契约] -> 内置标准表情包与内置反应资源也必须分开 -> 现有 `USE_BUILTIN_EMOTES` 同时注入 `BUILTIN_EMOTE_PACK` 和 `BUILTIN_REACTION_PACK`，反应图片还错误受 `art_assets_enabled` 控制；任务 132 将新增独立内置反应能力并保持反应总开关优先。
+- [四开关边界] -> `ENABLE_EMOTES` / `ENABLE_REACTIONS` 分别是功能总开关，`USE_BUILTIN_EMOTES` / `USE_BUILTIN_REACTIONS` 分别控制两组内置资源；`USE_ART_ASSETS` 只控制其他默认美术，不再进入表情或反应资源判断。
+- [最终集成验证] -> 7 个目标测试文件 43 项通过，类型检查、构建、普通与 StarDust 两套 Worker dry-run 均通过；随后以 2 个 Vitest worker 运行 77 个文件、508 项全量测试，全部通过。

@@ -64,6 +64,17 @@ describe("getInstanceBranding", () => {
     });
   });
 
+  it("can disable bundled emotes without disabling bundled reactions", () => {
+    const branding = getInstanceBranding(
+      envWith({ USE_BUILTIN_EMOTES: "0", USE_BUILTIN_REACTIONS: "1", ENABLE_REACTIONS: "1" }),
+    );
+    expect(branding).toMatchObject({
+      builtin_emotes_enabled: false,
+      builtin_reactions_enabled: true,
+      reactions_enabled: true,
+    });
+  });
+
   it("rejects unsafe non-HTTPS external logo values", () => {
     expect(getInstanceBranding(envWith({ INSTANCE_LOGO_URL: "http://example.com/logo.svg" })).logo_url).toBeNull();
     expect(getInstanceBranding(envWith({ INSTANCE_LOGO_URL: "javascript:alert(1)" })).logo_url).toBeNull();

@@ -22,6 +22,8 @@ describe("OMEW authentication boundary", () => {
     expect(stardustConfig).toContain('"PERSONAL_SETTINGS_SECTIONS": "profile,appearance"');
     expect(stardustConfig).toContain('"ENABLE_EMOTES": "1"');
     expect(stardustConfig).toContain('"USE_BUILTIN_EMOTES": "1"');
+    expect(stardustConfig).toContain('"ENABLE_REACTIONS": "1"');
+    expect(stardustConfig).toContain('"USE_BUILTIN_REACTIONS": "1"');
     expect(stardustConfig).toContain('"USE_ART_ASSETS": "0"');
     expect(stardustConfig).toContain('"SSO_USE_PAR": "1"');
     expect(stardustConfig).toContain("global_fetch_strictly_public");
