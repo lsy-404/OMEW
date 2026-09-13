@@ -835,6 +835,7 @@ export const mockApi = {
       sso_mode: config.sso_mode,
       sso_enabled: config.sso_mode !== 'disabled' && config.sso_client_secret_configured && !!config.sso_issuer && !!config.sso_client_id,
       sso_provider_name: config.sso_provider_name,
+      sso_session_locked: false,
       logo_url: null,
       emotes_enabled: true,
       builtin_emotes_enabled: true,
@@ -1920,7 +1921,7 @@ export const mockApi = {
     const startIndex = after ? sorted.findIndex((u) => u.username === after) + 1 : 0
     const page = sorted.slice(startIndex, startIndex + 50)
     return delay({
-      users: page.map((u) => ({ localpart: u.username, server_role: u.server_role, created_at: u.created_at })),
+      users: page.map((u) => ({ localpart: u.username, username: u.username, server_role: u.server_role, created_at: u.created_at })),
       next_cursor: sorted.length > startIndex + 50 ? page[page.length - 1]!.username : null,
     })
   },

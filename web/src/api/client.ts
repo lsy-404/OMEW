@@ -105,6 +105,7 @@ interface WireMemberEntry {
 
 interface WireBanEntry {
   actor: string
+  username?: string
   operator: string
   banned_at: number
   expires_at: number | null
@@ -113,6 +114,7 @@ interface WireBanEntry {
 function toBanEntry(entry: WireBanEntry): BanEntry {
   return {
     actor: entry.actor,
+    username: entry.username,
     banned_by: entry.operator,
     banned_at: new Date(entry.banned_at).toISOString(),
     expires_at: entry.expires_at == null ? null : new Date(entry.expires_at).toISOString(),

@@ -31,6 +31,7 @@ export interface SsoRuntimeConfig {
   use_jarm: boolean;
   use_dpop: boolean;
   jar_private_jwk: string;
+  session_locked: boolean;
 }
 
 function parseBool(value: string | undefined, fallback: boolean): boolean {
@@ -99,12 +100,13 @@ export function isValidOidcIssuer(value: string): boolean {
 }
 
 export function getSsoConfig(env: Env): SsoRuntimeConfig {
+  const mode = parseSsoMode(env.SSO_MODE);
   const issuer = (env.SSO_ISSUER?.trim() ?? "").replace(/\/+$/, "");
   const clientId = env.SSO_CLIENT_ID?.trim() ?? "";
   const clientSecret = env.SSO_CLIENT_SECRET ?? "";
   const providerName = env.SSO_PROVIDER_NAME?.trim() || "SSO";
   return {
-    mode: parseSsoMode(env.SSO_MODE),
+    mode,
     issuer,
     client_id: clientId,
     client_secret: clientSecret,
@@ -114,6 +116,7 @@ export function getSsoConfig(env: Env): SsoRuntimeConfig {
     use_jarm: env.SSO_USE_JARM === "1",
     use_dpop: env.SSO_USE_DPOP === "1",
     jar_private_jwk: env.SSO_JAR_PRIVATE_JWK?.trim() ?? "",
+    session_locked: mode === "required" && Boolean(env.EMBED_ORIGIN?.trim()),
   };
 }
 

@@ -25,3 +25,4 @@ TypeScript、Hono/Workers、Vue 3/Vite、Wrangler、Vitest。
 - [任务 119 默认据点创建策略](119_[Fix]_默认据点创建策略/)
 - [任务 125 通用 SSO 模式接入](125_[Feature]_通用SSO模式接入/)
 - [任务 126 StarDust 实例 SSO 部署](126_[Feature]_StarDust实例SSO部署/)
+- [任务 128 论坛自动登录与用户名迁移](128_[Fix]_论坛自动登录与用户名迁移/)

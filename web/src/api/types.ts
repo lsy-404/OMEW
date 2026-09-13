@@ -31,6 +31,7 @@ export interface InstanceConfig {
   sso_mode: SsoMode
   sso_enabled: boolean
   sso_provider_name: string
+  sso_session_locked: boolean
   logo_url: string | null
   emotes_enabled: boolean
   builtin_emotes_enabled: boolean
@@ -258,6 +259,7 @@ export interface MemberPage {
 
 export interface BanEntry {
   actor: string
+  username?: string
   banned_by: string
   banned_at: string
   expires_at: string | null
@@ -287,6 +289,7 @@ export interface DirectMessage {
 // /api/admin/users/:localpart remains server-owner-only.
 export interface AdminUserEntry {
   localpart: string
+  username: string
   server_role: ServerRole
   created_at: number
 }

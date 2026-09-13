@@ -132,4 +132,15 @@ describe("single stronghold instance mode", () => {
     expect(direct.status).toBe(403);
     expect(await direct.text()).toContain("仅在星尘粉丝站内提供");
   });
+
+  it("locks logout for the embedded required-SSO forum", async () => {
+    env.SSO_MODE = "required";
+    const config = await apiRequest("/api/instance/config");
+    expect(await config.json()).toMatchObject({ sso_session_locked: true });
+
+    const logout = await apiRequest("/api/auth/logout", { method: "POST" });
+    expect(logout.status).toBe(403);
+    expect(await logout.json()).toEqual({ error: "LOGOUT_DISABLED" });
+    env.SSO_MODE = "disabled";
+  });
 });

@@ -9,7 +9,7 @@ import {
   mapOidcIdentity,
 } from "../server/src/oidc";
 import { getSsoConfig } from "../server/src/config";
-import { ensureMigrated } from "./helpers";
+import { apiRequest, ensureMigrated, sessionToken } from "./helpers";
 
 const ISSUER = "https://identity.example";
 const CLIENT_ID = "omew-test";
@@ -152,6 +152,56 @@ describe("OMEW OIDC client", () => {
       ...identity,
       subject: "conflicting-subject",
     })).rejects.toMatchObject({ code: "SSO_USERNAME_CONFLICT", status: 409 });
+  });
+
+  it("migrates a legacy SSO username without changing its referenced local identity", async () => {
+    const localpart = "sso-legacy-user-identity";
+    const subject = "legacy-user-subject";
+    const now = Date.now();
+    await env.DB.batch([
+      env.DB.prepare(
+        "INSERT INTO users (localpart, display_name, status, created_at, server_role, email, email_verified) VALUES (?, ?, 'active', ?, 'user', NULL, 0)",
+      ).bind(localpart, "Legacy User", now),
+      env.DB.prepare(
+        "INSERT INTO oidc_identities (issuer, subject, localpart, username, created_at, last_login_at) VALUES (?, ?, ?, NULL, ?, ?)",
+      ).bind(ISSUER, subject, localpart, now, now),
+      env.DB.prepare(
+        "INSERT INTO oidc_login_completions (code_hash, localpart, expires_at) VALUES (?, ?, ?)",
+      ).bind("legacy-completion-reference", localpart, Math.floor(now / 1000) + 60),
+    ]);
+
+    const mapped = await mapOidcIdentity(env, {
+      issuer: ISSUER,
+      subject,
+      username: "legacy-user",
+      display_name: "Legacy User",
+      email: null,
+      email_verified: false,
+    });
+
+    expect(mapped).toMatchObject({ localpart, username: "legacy-user" });
+    expect(await env.DB.prepare("SELECT localpart, username FROM oidc_identities WHERE issuer = ? AND subject = ?")
+      .bind(ISSUER, subject).first()).toEqual({ localpart, username: "legacy-user" });
+    expect(await env.DB.prepare("SELECT localpart FROM oidc_login_completions WHERE code_hash = ?")
+      .bind("legacy-completion-reference").first()).toEqual({ localpart });
+
+    const adminToken = await sessionToken("@oidc-alias-admin:local", "owner");
+    const users = await apiRequest("/api/admin/users", { headers: { Authorization: `Bearer ${adminToken}` } });
+    expect(users.status).toBe(200);
+    expect((await users.json() as { users: Array<{ localpart: string; username: string }> }).users)
+      .toContainEqual(expect.objectContaining({ localpart, username: "legacy-user" }));
+
+    const profile = await apiRequest(`/api/users/${encodeURIComponent(`@${localpart}:local`)}`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+    expect(await profile.json()).toMatchObject({ actor: `@${localpart}:local`, username: "legacy-user" });
+
+    await env.DB.prepare(
+      "UPDATE users SET status = 'banned', banned_by = ?, banned_at = ?, banned_until = NULL WHERE localpart = ?",
+    ).bind("@oidc-alias-admin:local", now, localpart).run();
+    const bans = await apiRequest("/api/admin/bans", { headers: { Authorization: `Bearer ${adminToken}` } });
+    expect((await bans.json() as { entries: Array<{ actor: string; username: string }> }).entries)
+      .toContainEqual(expect.objectContaining({ actor: `@${localpart}:local`, username: "legacy-user" }));
   });
 
   it("negotiates client_secret_post when the provider does not publish Basic", async () => {

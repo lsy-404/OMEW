@@ -7,7 +7,7 @@ import { WinButton } from '../vendor/winui'
 import AvatarBadge from './AvatarBadge.vue'
 import DirectMessagePanel from './DirectMessagePanel.vue'
 
-// task 048: group membership is server-level and read-only here - assignment
+// Group membership is server-level and read-only here; assignment
 // moved to ServerAdminModal's member rows, so this card just displays the
 // badges already carried on `member.groups` (populated from the batch
 // GET /api/server-groups/members lookup).
@@ -87,7 +87,6 @@ onMounted(async () => {
             <p class="member-info-card__username">@{{ profile?.username ?? member.username }}</p>
           </div>
         </div>
-        <p class="member-info-card__actor">{{ member.actor }}</p>
         <p v-if="member.is_guest" class="member-info-card__guest">宾客 · 来自 {{ member.home_domain }}</p>
         <p v-if="introduction" class="member-info-card__bio">{{ introduction }}</p>
         <p v-else class="member-info-card__bio member-info-card__bio--empty">这个人还没有留下自我介绍。</p>
@@ -201,12 +200,6 @@ onMounted(async () => {
 }
 
 .member-info-card__username { margin: .1rem 0 0; color: var(--text-secondary); font-size: .72rem; }
-
-.member-info-card__actor {
-  margin: 0;
-  font-size: 0.8rem;
-  color: var(--text-tertiary);
-}
 
 .member-info-card__guest {
   margin: 0;

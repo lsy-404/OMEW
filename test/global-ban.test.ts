@@ -46,7 +46,7 @@ describe("global account bans", () => {
     const listed = await apiRequest("/api/admin/bans", { headers: { Authorization: `Bearer ${owner.token}` } });
     expect(listed.status).toBe(200);
     expect((await listed.json() as { entries: Array<Record<string, unknown>> }).entries).toContainEqual(
-      expect.objectContaining({ actor: target.actor, operator: admin.actor, expires_at: expiry }),
+      expect.objectContaining({ actor: target.actor, username: target.username, operator: admin.actor, expires_at: expiry }),
     );
 
     const unbanned = await apiRequest(`/api/admin/bans/${encodeURIComponent(target.actor)}`, {

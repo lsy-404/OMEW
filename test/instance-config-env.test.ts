@@ -108,6 +108,12 @@ describe("getSsoConfig", () => {
     }))).toMatchObject({ mode: "required", configured: true });
   });
 
+  it("locks the SSO session only for embedded required-mode instances", () => {
+    expect(getSsoConfig(envWith({ SSO_MODE: "required", EMBED_ORIGIN: "https://host.example" })).session_locked).toBe(true);
+    expect(getSsoConfig(envWith({ SSO_MODE: "required" })).session_locked).toBe(false);
+    expect(getSsoConfig(envWith({ SSO_MODE: "optional", EMBED_ORIGIN: "https://host.example" })).session_locked).toBe(false);
+  });
+
   it("accepts HTTPS issuers and loopback HTTP only for local development", () => {
     expect(isValidOidcIssuer("https://identity.example")).toBe(true);
     expect(isValidOidcIssuer("http://localhost:8787")).toBe(true);

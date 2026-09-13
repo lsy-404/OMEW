@@ -263,7 +263,7 @@ async function banGlobally(user: AdminUserEntry) {
   const expiresAt = selectedGlobalExpiry()
   if (expiresAt === undefined) return
   const duration = expiresAt == null ? '永久' : `至 ${new Date(expiresAt).toLocaleString()}`
-  if (!confirm(`确定全局封禁「${user.localpart}」吗？该账号将无法访问本服务器；${duration}。`)) return
+  if (!confirm(`确定全局封禁「${user.username}」吗？该账号将无法访问本服务器；${duration}。`)) return
   globalBanBusyActor.value = user.localpart
   globalBansError.value = ''
   try {
@@ -1076,7 +1076,7 @@ watch(
                 <ul v-if="users.length" class="user-list">
                   <li v-for="user in users" :key="user.localpart" class="user-row">
                     <div class="user-row__main">
-                      <span class="user-row__name">{{ user.localpart }}</span>
+                      <span class="user-row__name">{{ user.username }}</span>
                       <span class="user-row__role" :class="`user-row__role--${user.server_role}`">{{ user.server_role }}</span>
                       <span class="user-row__date">{{ new Date(user.created_at).toLocaleDateString() }}</span>
                       <div class="user-row__actions">
@@ -1152,7 +1152,7 @@ watch(
                 <ul v-else class="user-list">
                   <li v-for="ban in globalBans" :key="ban.actor" class="user-row">
                     <div class="user-row__main">
-                      <span class="user-row__name">{{ ban.actor }}</span>
+                      <span class="user-row__name">@{{ ban.username ?? ban.actor.replace(/^@/, '').split(':')[0] }}</span>
                       <span class="field__hint">{{ formatExpiry(ban.expires_at) }}</span>
                       <div class="user-row__actions">
                         <WinButton

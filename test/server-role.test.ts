@@ -39,18 +39,18 @@ beforeAll(async () => {
 });
 
 describe("GET /api/admin/users (server_owner/server_admin)", () => {
-  it("lists localpart/server_role/created_at", async () => {
+  it("lists the visible username alongside the stable localpart and role", async () => {
     const owner = await makeOwner();
     const listed = await freshUser("listuser");
 
     const res = await apiRequest("/api/admin/users", { headers: { Authorization: `Bearer ${owner.token}` } });
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
-      users: Array<{ localpart: string; server_role: string; created_at: number }>;
+      users: Array<{ localpart: string; username: string; server_role: string; created_at: number }>;
       next_cursor: string | null;
     };
     const entry = body.users.find((u) => u.localpart === listed.username);
-    expect(entry).toMatchObject({ localpart: listed.username, server_role: "user" });
+    expect(entry).toMatchObject({ localpart: listed.username, username: listed.username, server_role: "user" });
     expect(typeof entry?.created_at).toBe("number");
   });
 

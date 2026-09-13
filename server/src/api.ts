@@ -851,6 +851,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
       sso_mode: sso.mode,
       sso_enabled: sso.mode !== "disabled" && sso.configured,
       sso_provider_name: sso.provider_name,
+      sso_session_locked: sso.session_locked,
       ...getInstanceBranding(env),
     });
   }
@@ -933,7 +934,8 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     if (!sso.configured) return apiError(503, "SSO_NOT_CONFIGURED");
     try {
       const refreshed = await refreshOidcSession(env, session, sso);
-      const localpart = localpartOfActor(session.actor);
+      const mapped = await mapOidcIdentity(env, refreshed.identity);
+      const localpart = mapped.localpart;
       const user = await localUserByLocalpart(env, localpart);
       if (!user || user.status !== "active") return apiError(401, "ACCOUNT_DISABLED");
       await touchLastActive(env, localpart);
@@ -945,6 +947,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
   }
 
   if (method === "POST" && path === "/api/auth/logout") {
+    if (getSsoConfig(env).session_locked) return apiError(403, "LOGOUT_DISABLED");
     const session = await requireSession(request, env);
     if (session instanceof Response) return session;
     let logoutUrl: string | null = null;
@@ -1736,10 +1739,11 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     if (gate instanceof Response) return gate;
     const after = url.searchParams.get("after");
     const { results } = await env.DB.prepare(
-      "SELECT localpart, server_role, created_at FROM users WHERE localpart > ? ORDER BY localpart LIMIT ?"
+      "SELECT u.localpart, COALESCE((SELECT username FROM oidc_identities WHERE localpart = u.localpart LIMIT 1), u.localpart) AS username, u.server_role, u.created_at " +
+        "FROM users u WHERE u.localpart > ? ORDER BY u.localpart LIMIT ?"
     )
       .bind(after ?? "", USERS_PAGE_SIZE + 1)
-      .all<{ localpart: string; server_role: ServerRole; created_at: number }>();
+      .all<{ localpart: string; username: string; server_role: ServerRole; created_at: number }>();
     const hasMore = results.length > USERS_PAGE_SIZE;
     const page = hasMore ? results.slice(0, USERS_PAGE_SIZE) : results;
     return json({ users: page, next_cursor: hasMore ? page[page.length - 1]!.localpart : null });
@@ -1753,9 +1757,10 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
         "WHERE status = 'banned' AND banned_until IS NOT NULL AND banned_until <= ?"
     ).bind(Date.now()).run();
     const { results } = await env.DB.prepare(
-      "SELECT localpart, banned_by, banned_at, banned_until FROM users WHERE status = 'banned' ORDER BY banned_at DESC"
-    ).all<{ localpart: string; banned_by: string; banned_at: number; banned_until: number | null }>();
-    return json({ entries: results.map((entry) => ({ actor: `@${entry.localpart}:${instanceDomain(env)}`, operator: entry.banned_by, banned_at: entry.banned_at, expires_at: entry.banned_until })) });
+      "SELECT u.localpart, COALESCE((SELECT username FROM oidc_identities WHERE localpart = u.localpart LIMIT 1), u.localpart) AS username, " +
+        "u.banned_by, u.banned_at, u.banned_until FROM users u WHERE u.status = 'banned' ORDER BY u.banned_at DESC"
+    ).all<{ localpart: string; username: string; banned_by: string; banned_at: number; banned_until: number | null }>();
+    return json({ entries: results.map((entry) => ({ actor: `@${entry.localpart}:${instanceDomain(env)}`, username: entry.username, operator: entry.banned_by, banned_at: entry.banned_at, expires_at: entry.banned_until })) });
   }
 
   const globalBanMatch = match("/api/admin/bans/:actor", path);

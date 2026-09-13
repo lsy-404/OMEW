@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { api } from '../api'
 import { useAuth } from '../composables/useAuth'
 import { useAuthModal } from '../composables/useAuthModal'
+import { useInstanceConfig } from '../composables/useInstanceConfig'
 import { useStronghold } from '../composables/useStronghold'
 import { useStrongholdMembers } from '../composables/useStrongholdMembers'
 import { useTheme } from '../composables/useTheme'
@@ -15,6 +16,7 @@ const emit = defineEmits<{ 'open-server-admin': []; 'open-panel': ['members' | '
 
 const { mode, cycleTheme } = useTheme()
 const auth = useAuth()
+const { config: instanceConfig } = useInstanceConfig()
 const { selectedNodeId, isPublicPreview, isReadOnly, loadStrongholds } = useStronghold()
 const { myRole } = useStrongholdMembers()
 const { openAuthModal } = useAuthModal()
@@ -41,7 +43,7 @@ const userMenu = computed(() => ({
   Items: [
     ...(auth.isAdmin.value ? [{ Text: '服务器管理', Value: 'server-admin' }] : []),
     { Text: '个人设置', Value: 'personal-settings' },
-    { Text: '登出', Value: 'logout' },
+    ...(instanceConfig.value?.sso_session_locked ? [] : [{ Text: '登出', Value: 'logout' }]),
   ],
 }))
 

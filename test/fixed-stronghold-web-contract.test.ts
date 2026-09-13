@@ -4,8 +4,12 @@ import chatPane from "../web/src/components/ChatPane.vue?raw";
 import emptyState from "../web/src/components/EmptyState.vue?raw";
 import landingPage from "../web/src/components/LandingPage.vue?raw";
 import mobileNavBar from "../web/src/components/MobileNavBar.vue?raw";
+import memberInfoCard from "../web/src/components/MemberInfoCard.vue?raw";
 import nodeRail from "../web/src/components/NodeRail.vue?raw";
 import postModal from "../web/src/components/PostModal.vue?raw";
+import rightColumn from "../web/src/components/RightColumn.vue?raw";
+import serverAdminModal from "../web/src/components/ServerAdminModal.vue?raw";
+import strongholdAdminModal from "../web/src/components/StrongholdAdminModal.vue?raw";
 import useEmotes from "../web/src/composables/useEmotes.ts?raw";
 import indexHtml from "../web/index.html?raw";
 
@@ -35,5 +39,18 @@ describe("single stronghold web contract", () => {
     expect(landingPage).toContain("v-if=\"artAssetsEnabled\"")
     expect(emptyState).toContain("v-if=\"image\"")
     expect(indexHtml).not.toContain('rel="icon"')
+  });
+
+  it("automatically starts SSO and hides logout for a locked embedded session", () => {
+    expect(app).toContain("instanceConfig.value?.sso_session_locked === true")
+    expect(app).toContain("/api/auth/oidc/start?return_to=")
+    expect(app).toContain("正在使用 {{ instanceConfig?.sso_provider_name || '统一身份' }} 登录…")
+    expect(rightColumn).toContain("instanceConfig.value?.sso_session_locked ? []")
+  });
+
+  it("renders username aliases instead of internal actor localparts", () => {
+    expect(memberInfoCard).not.toContain('class="member-info-card__actor"')
+    expect(strongholdAdminModal).toContain('<span class="member-row__actor">@{{ member.username }}</span>')
+    expect(serverAdminModal).toContain('<span class="user-row__name">{{ user.username }}</span>')
   });
 });

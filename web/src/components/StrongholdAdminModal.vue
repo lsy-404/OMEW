@@ -20,9 +20,8 @@ import RoomManager from './SectionManager.vue'
 
 // stronghold-scoped management only (members / blacklist / stronghold
 // settings) - server-level administration (policy, server members, invite
-// codes, emote packs, user groups) lives in the separate ServerAdminModal
-// (task 039 split, task 048 moved groups off this panel entirely). A
-// PostModal-style floating window, not a full-screen shell swap (task 048).
+// codes, emote packs, user groups) lives in the separate ServerAdminModal.
+// This is a PostModal-style floating window, not a full-screen shell swap.
 const props = withDefaults(defineProps<{ open: boolean; initialTab?: 'members' | 'settings' }>(), { initialTab: 'members' })
 const emit = defineEmits<{ close: [] }>()
 
@@ -402,7 +401,7 @@ watch(
                     <AvatarBadge :seed="member.username" :size="36" :avatar-url="member.avatar ?? undefined" />
                     <span class="member-row__names">
                       <span class="member-row__display-name">{{ member.display_name }}</span>
-                      <span class="member-row__actor">{{ member.actor }}</span>
+                      <span class="member-row__actor">@{{ member.username }}</span>
                       <span v-if="member.groups.length" class="member-row__groups">
                         <span v-for="g in member.groups" :key="g.id" class="group-badge">
                           <span class="group-badge__dot" :style="{ backgroundColor: g.color ?? 'var(--ctrl-fill-tertiary)' }" />

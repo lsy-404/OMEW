@@ -56,6 +56,14 @@ const showInstanceLoading = computed(() =>
 const showInstanceConfigurationError = computed(() =>
   isHome.value && !instanceConfigLoading.value && singleMode.value && !instanceConfig.value?.root_stronghold,
 )
+const authReady = ref(false)
+const automaticSsoRedirecting = ref(false)
+const showAutomaticSsoLoading = computed(() =>
+  !auth.isAuthenticated.value &&
+  instanceConfig.value?.sso_session_locked === true &&
+  instanceConfig.value.sso_enabled &&
+  !auth.ssoCompletionError.value,
+)
 useDocumentTitle(isHome, instanceName)
 
 function syncFavicon(logoUrl: string | null) {
@@ -109,9 +117,33 @@ watch(
   { immediate: true },
 )
 
+watch(
+  [authReady, instanceConfig, auth.isAuthenticated, () => auth.ssoCompletionError.value],
+  ([ready, config, authenticated, completionError]) => {
+    if (
+      !ready ||
+      authenticated ||
+      completionError ||
+      automaticSsoRedirecting.value ||
+      !config?.sso_session_locked ||
+      !config.sso_enabled
+    ) return
+    automaticSsoRedirecting.value = true
+    const returnTo = `${window.location.pathname}${window.location.search}`
+    window.location.assign(`/api/auth/oidc/start?return_to=${encodeURIComponent(returnTo)}`)
+  },
+  { immediate: true },
+)
+
+async function initializeAuth() {
+  await auth.completeOidcLoginFromLocation()
+  if (auth.isAuthenticated.value && auth.authSource.value === 'sso') await auth.refreshSso()
+  authReady.value = true
+}
+
 onMounted(() => {
   window.addEventListener('popstate', syncHomeFromAddress)
-  void auth.completeOidcLoginFromLocation()
+  void initializeAuth()
   const timer = window.setInterval(() => {
     if (auth.isAuthenticated.value && auth.authSource.value === 'sso') void auth.refreshSso()
   }, 4 * 60 * 1000)
@@ -144,6 +176,11 @@ onBeforeUnmount(() => {
 
     <div v-else-if="showInstanceConfigurationError" class="shell__loading" role="alert">
       <span>单据点模式尚未配置有效的主据点，请联系管理员。</span>
+    </div>
+
+    <div v-else-if="showAutomaticSsoLoading" class="shell__loading" role="status" aria-live="polite" aria-busy="true">
+      <span class="shell__loading-spinner" aria-hidden="true" />
+      <span>正在使用 {{ instanceConfig?.sso_provider_name || '统一身份' }} 登录…</span>
     </div>
 
     <AuthGate v-else-if="showAuthGate" />
