@@ -49,6 +49,9 @@ const editingText = ref('')
 const actionNotice = ref('')
 const canParticipate = computed(() => auth.isAuthenticated.value && !isReadOnly.value)
 const reactionsEnabled = computed(() => instanceConfig.value?.reactions_enabled !== false)
+const builtinReactionsEnabled = computed(
+  () => instanceConfig.value?.reactions_enabled !== false && instanceConfig.value?.builtin_reactions_enabled !== false,
+)
 
 function displayName(actor: string): string {
   return members.value.find((m) => m.actor === actor)?.display_name ?? actorLocalpart(actor)
@@ -248,7 +251,7 @@ async function sharePost() {
 }
 
 function openReactionPicker(event: MouseEvent) {
-  if (!reactionsEnabled.value) return
+  if (!reactionsEnabled.value || !builtinReactionsEnabled.value) return
   actionNotice.value = ''
   if (!auth.isAuthenticated.value) {
     openAuthModal()
@@ -318,7 +321,7 @@ const visiblePostMedia = computed(() => {
                   <button type="button" class="post-modal__action" aria-label="转发" title="转发" @click="sharePost">
                     <AppIcon name="repeat" :size="19" />
                   </button>
-                  <button v-if="reactionsEnabled" type="button" class="post-modal__action" aria-label="添加反应" title="添加反应" @click="openReactionPicker">
+                  <button v-if="reactionsEnabled && builtinReactionsEnabled" type="button" class="post-modal__action" aria-label="添加反应" title="添加反应" @click="openReactionPicker">
                     <AppIcon name="emote" :size="19" />
                   </button>
                 </div>

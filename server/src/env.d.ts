@@ -25,6 +25,7 @@ interface Env {
   ENABLE_EMOTES?: string;
   USE_BUILTIN_EMOTES?: string;
   ENABLE_REACTIONS?: string;
+  USE_BUILTIN_REACTIONS?: string;
   USE_ART_ASSETS?: string;
   CF_API_TOKEN?: string;
   CF_ACCOUNT_ID?: string;
@@ -52,6 +53,7 @@ declare namespace Cloudflare {
     ENABLE_EMOTES?: string;
     USE_BUILTIN_EMOTES?: string;
     ENABLE_REACTIONS?: string;
+    USE_BUILTIN_REACTIONS?: string;
     USE_ART_ASSETS?: string;
     CF_API_TOKEN?: string;
     CF_ACCOUNT_ID?: string;

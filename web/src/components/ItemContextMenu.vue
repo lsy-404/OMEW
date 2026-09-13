@@ -18,7 +18,10 @@ const anchorRect = ref<{ top: number; left: number; right: number; bottom: numbe
 
 const reactionNames = Object.keys(BUILTIN_REACTION_SET)
 const { config: instanceConfig } = useInstanceConfig()
-const artAssetsEnabled = computed(() => instanceConfig.value?.art_assets_enabled !== false)
+const builtinReactionsEnabled = computed(
+  () => instanceConfig.value?.reactions_enabled !== false && instanceConfig.value?.builtin_reactions_enabled !== false,
+)
+const canPickBuiltinReaction = computed(() => props.canReact && builtinReactionsEnabled.value)
 
 function close() {
   open.value = false
@@ -43,7 +46,7 @@ const MIN_WIDTH = 160
 function estimateMenuSize(): { width: number; height: number } {
   const commandCount = [props.canEdit, props.canRetract].filter(Boolean).length
   const commandsHeight = commandCount * LIST_ITEM_HEIGHT
-  if (!props.canReact) return { width: MIN_WIDTH + CHROME, height: commandsHeight + CHROME }
+  if (!canPickBuiltinReaction.value) return { width: MIN_WIDTH + CHROME, height: commandsHeight + CHROME }
 
   const REACTION_COLUMNS = window.innerWidth <= NARROW_VIEWPORT ? 4 : 6
   const reactionRows = Math.ceil(reactionNames.length / REACTION_COLUMNS)
@@ -57,7 +60,7 @@ function estimateMenuSize(): { width: number; height: number } {
 }
 
 function openAt(x: number, y: number) {
-  if (!props.canReact && !props.canEdit && !props.canRetract) return
+  if (!canPickBuiltinReaction.value && !props.canEdit && !props.canRetract) return
   const { width: menuW, height: menuH } = estimateMenuSize()
   const vw = window.innerWidth
   const vh = window.innerHeight
@@ -113,7 +116,7 @@ defineExpose({ openAt })
 <template>
   <WinMenuFlyout :Open="open" :AnchorRect="anchorRect" :Items="[]" Placement="Bottom" @close="close">
     <div class="item-context-menu">
-      <div v-if="canReact" class="item-context-menu__reactions" role="group" aria-label="添加反应">
+      <div v-if="canPickBuiltinReaction" class="item-context-menu__reactions" role="group" aria-label="添加反应">
         <button
           v-for="name in reactionNames"
           :key="name"
@@ -123,11 +126,11 @@ defineExpose({ openAt })
           :title="name"
           @click="pick(name)"
         >
-          <img v-if="artAssetsEnabled && BUILTIN_REACTION_SET[name]" :src="BUILTIN_REACTION_SET[name]" :alt="name" />
+          <img v-if="BUILTIN_REACTION_SET[name]" :src="BUILTIN_REACTION_SET[name]" :alt="name" />
           <span v-else class="item-context-menu__reaction-fallback">{{ name }}</span>
         </button>
       </div>
-      <div v-if="canReact && (canEdit || canRetract)" class="item-context-menu__separator" role="separator"></div>
+      <div v-if="canPickBuiltinReaction && (canEdit || canRetract)" class="item-context-menu__separator" role="separator"></div>
       <div v-if="canEdit || canRetract" role="menu" class="win-menu-flyout-items">
         <button v-if="canEdit" type="button" class="win-menu-flyout-item" role="menuitem" @click="onEditClick">
           <span class="win-menu-flyout-label">编辑</span>

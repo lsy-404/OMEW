@@ -20,7 +20,8 @@ describe("single stronghold instance mode", () => {
     env.INSTANCE_NAME = "论坛";
     env.EMBED_ORIGIN = "https://stardustinfinity.top";
     env.USE_ART_ASSETS = "0";
-    env.USE_BUILTIN_EMOTES = "0";
+    env.USE_BUILTIN_EMOTES = "1";
+    env.USE_BUILTIN_REACTIONS = "1";
     await env.STRONGHOLD_DO.getByName("root-id").ensureConfigWithDefaults(
       "root-id",
       "Configured root",
@@ -49,6 +50,7 @@ describe("single stronghold instance mode", () => {
     env.EMBED_ORIGIN = undefined;
     env.USE_ART_ASSETS = undefined;
     env.USE_BUILTIN_EMOTES = undefined;
+    env.USE_BUILTIN_REACTIONS = undefined;
   });
 
   it("initializes and exposes the configured root stronghold", async () => {
@@ -60,8 +62,9 @@ describe("single stronghold instance mode", () => {
       root_stronghold: { id: "root-id", name: "Configured root", slug: "medium5" },
       logo_url: null,
       emotes_enabled: true,
-      builtin_emotes_enabled: false,
+      builtin_emotes_enabled: true,
       reactions_enabled: true,
+      builtin_reactions_enabled: true,
       art_assets_enabled: false,
     });
 

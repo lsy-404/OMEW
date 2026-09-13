@@ -842,6 +842,7 @@ export const mockApi = {
       emotes_enabled: true,
       builtin_emotes_enabled: true,
       reactions_enabled: true,
+      builtin_reactions_enabled: true,
       art_assets_enabled: true,
     })
   },

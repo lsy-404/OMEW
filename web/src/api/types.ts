@@ -38,6 +38,7 @@ export interface InstanceConfig {
   emotes_enabled: boolean
   builtin_emotes_enabled: boolean
   reactions_enabled: boolean
+  builtin_reactions_enabled: boolean
   art_assets_enabled: boolean
 }
 

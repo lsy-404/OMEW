@@ -17,6 +17,7 @@ export interface InstanceBranding {
   emotes_enabled: boolean;
   builtin_emotes_enabled: boolean;
   reactions_enabled: boolean;
+  builtin_reactions_enabled: boolean;
   art_assets_enabled: boolean;
 }
 
@@ -153,6 +154,7 @@ export function getInstanceBranding(env: Env): InstanceBranding {
     emotes_enabled: parseBool(env.ENABLE_EMOTES, true),
     builtin_emotes_enabled: parseBool(env.USE_BUILTIN_EMOTES, true),
     reactions_enabled: parseBool(env.ENABLE_REACTIONS, true),
+    builtin_reactions_enabled: parseBool(env.USE_BUILTIN_REACTIONS, true),
     art_assets_enabled: parseBool(env.USE_ART_ASSETS, true),
   };
 }

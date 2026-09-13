@@ -10,7 +10,9 @@ import { useInstanceConfig } from '../composables/useInstanceConfig'
 defineProps<{ reactions?: ItemReactions; canToggle: boolean }>()
 const emit = defineEmits<{ toggle: [name: string] }>()
 const { config: instanceConfig } = useInstanceConfig()
-const artAssetsEnabled = computed(() => instanceConfig.value?.art_assets_enabled !== false)
+const builtinReactionsEnabled = computed(
+  () => instanceConfig.value?.reactions_enabled !== false && instanceConfig.value?.builtin_reactions_enabled !== false,
+)
 </script>
 
 <template>
@@ -25,7 +27,7 @@ const artAssetsEnabled = computed(() => instanceConfig.value?.art_assets_enabled
       :title="entry.name"
       @click="emit('toggle', entry.name)"
     >
-      <img v-if="artAssetsEnabled && BUILTIN_REACTION_SET[entry.name]" class="reaction-chip__image" :src="BUILTIN_REACTION_SET[entry.name]" :alt="entry.name" />
+      <img v-if="builtinReactionsEnabled && BUILTIN_REACTION_SET[entry.name]" class="reaction-chip__image" :src="BUILTIN_REACTION_SET[entry.name]" :alt="entry.name" />
       <span v-else class="reaction-chip__fallback">{{ entry.name }}</span>
       <span class="reaction-chip__count">{{ entry.count }}</span>
     </button>

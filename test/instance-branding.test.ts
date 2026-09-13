@@ -13,6 +13,7 @@ describe("getInstanceBranding", () => {
       emotes_enabled: true,
       builtin_emotes_enabled: true,
       reactions_enabled: true,
+      builtin_reactions_enabled: true,
       art_assets_enabled: true,
     });
   });
@@ -26,6 +27,7 @@ describe("getInstanceBranding", () => {
           ENABLE_EMOTES: "0",
           USE_BUILTIN_EMOTES: "0",
           ENABLE_REACTIONS: "false",
+          USE_BUILTIN_REACTIONS: "0",
           USE_ART_ASSETS: "0",
         }),
       ),
@@ -35,7 +37,30 @@ describe("getInstanceBranding", () => {
       emotes_enabled: false,
       builtin_emotes_enabled: false,
       reactions_enabled: false,
+      builtin_reactions_enabled: false,
       art_assets_enabled: false,
+    });
+  });
+
+  it("keeps bundled emotes and reactions independent of general art assets", () => {
+    const branding = getInstanceBranding(
+      envWith({ USE_ART_ASSETS: "0", USE_BUILTIN_EMOTES: "1", USE_BUILTIN_REACTIONS: "1" }),
+    );
+    expect(branding).toMatchObject({
+      art_assets_enabled: false,
+      builtin_emotes_enabled: true,
+      builtin_reactions_enabled: true,
+    });
+  });
+
+  it("can disable bundled reactions without disabling bundled emotes", () => {
+    const branding = getInstanceBranding(
+      envWith({ USE_BUILTIN_EMOTES: "1", USE_BUILTIN_REACTIONS: "0", ENABLE_REACTIONS: "1" }),
+    );
+    expect(branding).toMatchObject({
+      builtin_emotes_enabled: true,
+      builtin_reactions_enabled: false,
+      reactions_enabled: true,
     });
   });
 
