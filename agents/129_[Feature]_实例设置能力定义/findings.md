@@ -14,3 +14,6 @@
 - [新增用户契约] -> 内置标准表情包与内置反应资源也必须分开 -> 现有 `USE_BUILTIN_EMOTES` 同时注入 `BUILTIN_EMOTE_PACK` 和 `BUILTIN_REACTION_PACK`，反应图片还错误受 `art_assets_enabled` 控制；任务 132 将新增独立内置反应能力并保持反应总开关优先。
 - [四开关边界] -> `ENABLE_EMOTES` / `ENABLE_REACTIONS` 分别是功能总开关，`USE_BUILTIN_EMOTES` / `USE_BUILTIN_REACTIONS` 分别控制两组内置资源；`USE_ART_ASSETS` 只控制其他默认美术，不再进入表情或反应资源判断。
 - [最终集成验证] -> 7 个目标测试文件 43 项通过，类型检查、构建、普通与 StarDust 两套 Worker dry-run 均通过；随后以 2 个 Vitest worker 运行 77 个文件、508 项全量测试，全部通过。
+- [生产配置] -> `/api/instance/config` 返回 `personal_settings_sections=[profile,appearance]`、两项内置资源开启、其他美术关闭；独立根路径和登出接口继续返回 403。
+- [真实入口] -> 刷新星尘站嵌入论坛后，个人设置仅显示“资料”“外观”，没有“安全”；表情选择器分别显示“反应”和“标准表情”两个区块。
+- [单据点行为] -> 部署前浏览器中的当前 OIDC 用户尚显示“加入据点”，部署并刷新完成自动登录后已成为 `medium5` 成员，发帖与聊天输入恢复可用。
