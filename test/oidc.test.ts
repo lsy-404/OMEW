@@ -148,6 +148,27 @@ describe("OMEW OIDC client", () => {
     expect(response.headers.get("Location")).toBe("http://localhost/#sso_complete=completion-code");
   });
 
+  it("establishes a constrained same-origin completion document for an embedded instance", async () => {
+    env.EMBED_ORIGIN = "https://host.example";
+    const response = oidcLoginCompletionRedirect(
+      new Request("http://localhost/api/auth/oidc/callback"),
+      env,
+      '/path?label="unsafe&value',
+      "completion-code",
+    );
+    env.EMBED_ORIGIN = undefined;
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Location")).toBeNull();
+    expect(response.headers.get("Content-Type")).toBe("text/html; charset=UTF-8");
+    expect(response.headers.get("Referrer-Policy")).toBe("same-origin");
+    expect(response.headers.get("Content-Security-Policy")).toContain("frame-ancestors https://host.example");
+    expect(response.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    const html = await response.text();
+    expect(html).toContain("http://localhost/path?label=%22unsafe&amp;value#sso_complete=completion-code");
+    expect(html).not.toContain("http://localhost/path?label=%22unsafe&value#sso_complete=completion-code");
+  });
+
   it("uses the provider username as the new local username and rejects collisions", async () => {
     const identity = {
       issuer: ISSUER,

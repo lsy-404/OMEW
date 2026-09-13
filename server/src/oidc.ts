@@ -399,6 +399,14 @@ function redirect(location: string, setCookie?: string, referrerPolicy: "no-refe
   return new Response(null, { status: 302, headers });
 }
 
+function escapeHtmlAttribute(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
 export function clearOidcTransactionCookie(request: Request): string {
   return cookieHeader(transactionCookieName(request), "", 0, new URL(request.url).protocol === "https:");
 }
@@ -966,5 +974,27 @@ export async function consumeOidcLoginCompletionDetails(env: Env, code: string):
 export function oidcLoginCompletionRedirect(request: Request, env: Env, returnTo: string, code: string): Response {
   const destination = new URL(safeReturnTo(returnTo), trustedRequestOrigin(request, env));
   destination.hash = new URLSearchParams({ sso_complete: code }).toString();
-  return redirect(destination.toString(), clearOidcTransactionCookie(request), "same-origin");
+  const clearCookie = clearOidcTransactionCookie(request);
+  const embedOrigin = env.EMBED_ORIGIN?.trim();
+  if (!embedOrigin) return redirect(destination.toString(), clearCookie, "same-origin");
+
+  let frameAncestor: string;
+  try {
+    frameAncestor = new URL(embedOrigin).origin;
+  } catch {
+    return redirect(destination.toString(), clearCookie, "same-origin");
+  }
+
+  const target = escapeHtmlAttribute(destination.toString());
+  const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="referrer" content="same-origin"><meta http-equiv="refresh" content="0;url=${target}"><title>正在进入论坛</title></head><body><a href="${target}">继续进入论坛</a></body></html>`;
+  const headers = new Headers({
+    "Cache-Control": "no-store",
+    "Content-Security-Policy": `default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors ${frameAncestor}`,
+    "Content-Type": "text/html; charset=UTF-8",
+    Pragma: "no-cache",
+    "Referrer-Policy": "same-origin",
+    "X-Content-Type-Options": "nosniff",
+  });
+  headers.append("Set-Cookie", clearCookie);
+  return new Response(html, { status: 200, headers });
 }

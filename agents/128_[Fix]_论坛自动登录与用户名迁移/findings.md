@@ -19,3 +19,7 @@
 - [修复后首次全量测试] -> 75 个文件并行运行时 `server-role` 与 `stronghold-deletion` 各有 1 项超过 5 秒 -> 两项均不触及本次认证或嵌入门禁代码，目标认证测试已通过；单独重跑失败文件以区分资源竞争和真实回归。
 - [隔离重跑] -> 单独运行两个超时文件 -> 2 个文件、18 项全部通过，确认首次失败来自全量并行资源竞争；随后限制 worker 数重新运行完整套件。
 - [最终验证] -> 将 Vitest worker 限制为 4 后重跑完整套件 -> 75 个测试文件、495 项全部通过；类型检查、前端构建和 Worker dry-run 同步通过。
+- [首次门禁修复仍失败] -> 部署后刷新已有 StarDust 会话的 Edge `/omew` -> iframe 仍停在 `/#sso_complete=...` 并被 embed-only 拒绝，说明重定向响应的 `same-origin` policy 并不会把 callback URL 建立为最终根文档导航的 Referer。
+- [修正方案] -> 评估 cookie、放宽无 Referer 与同源中转 -> 第三方 cookie 不可靠，允许无 Referer 会破坏独立访问边界；callback 在嵌入实例返回带精确 `frame-ancestors` CSP 的 200 同源中转文档，再通过 meta refresh 导航到 completion URL，可建立可信的 OMEW 文档发起者。
+- [中转安全边界] -> 检查 completion URL、响应缓存与嵌入来源 -> 目标由同源 `safeReturnTo` 构造并进行 HTML attribute 转义；响应使用 `no-store`、`nosniff`、`same-origin` referrer policy，以及只允许配置父站的 `frame-ancestors`。
+- [中转实现验证] -> 目标测试、类型检查、构建、dry-run 和受控并行全量测试 -> 目标 14 项通过，完整 75 个文件、496 项通过。
