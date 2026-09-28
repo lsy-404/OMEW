@@ -68,7 +68,7 @@ describe("OMEW OIDC client", () => {
     const idToken = await new SignJWT({
       nonce,
       name: "统一用户",
-      preferred_username: "sso-user",
+      preferred_username: "星尘·同好",
       email: "sso-user@example.com",
       email_verified: true,
     })
@@ -93,7 +93,7 @@ describe("OMEW OIDC client", () => {
         return Response.json({ access_token: "access-token", token_type: "Bearer", id_token: idToken });
       }
       if (url === `${ISSUER}/jwks.json`) return Response.json({ keys: [publicJwk] });
-      if (url === `${ISSUER}/userinfo`) return Response.json({ sub: "provider-user", preferred_username: "sso-user" });
+      if (url === `${ISSUER}/userinfo`) return Response.json({ sub: "provider-user", preferred_username: "星尘·同好" });
       throw new Error(`unexpected upstream URL: ${url}`);
     });
 
@@ -101,8 +101,8 @@ describe("OMEW OIDC client", () => {
     expect(finish.identity).toMatchObject({
       issuer: ISSUER,
       subject: "provider-user",
-      username: "sso-user",
-      display_name: "sso-user",
+      username: "星尘·同好",
+      display_name: "星尘·同好",
       email: "sso-user@example.com",
       email_verified: true,
     });
@@ -131,9 +131,41 @@ describe("OMEW OIDC client", () => {
     expect(second.localpart).toBe(first.localpart);
     expect(second.username).toBe("stable-user");
     expect(second.display_name).toBe("Stable User");
+    const renamed = await mapOidcIdentity(env, { ...identity, username: "stable.user" });
+    expect(renamed.localpart).toBe(first.localpart);
+    expect(renamed.username).toBe("stable.user");
     const completion = await createOidcLoginCompletion(env, first.localpart);
     expect(await consumeOidcLoginCompletion(env, completion)).toBe(first.localpart);
     expect(await consumeOidcLoginCompletion(env, completion)).toBeNull();
+  });
+
+  it.each(["星尘·同好", "fan.name"])('admits a provider username with special characters: %s', async (username) => {
+    const identity = {
+      issuer: ISSUER,
+      subject: `special-${username}`,
+      username,
+      display_name: username,
+      email: null,
+      email_verified: false,
+    };
+    const first = await mapOidcIdentity(env, identity);
+    expect(first.localpart).toMatch(/^sso-[a-f0-9]{24}$/);
+    expect(first.username).toBe(username);
+
+    const second = await mapOidcIdentity(env, identity);
+    expect(second.localpart).toBe(first.localpart);
+    expect(second.username).toBe(username);
+  });
+
+  it("still requires a provider username for a new SSO identity", async () => {
+    await expect(mapOidcIdentity(env, {
+      issuer: ISSUER,
+      subject: "missing-username-subject",
+      username: null,
+      display_name: "Unknown",
+      email: null,
+      email_verified: false,
+    })).rejects.toMatchObject({ code: "SSO_USERNAME_INVALID", status: 400 });
   });
 
   it("preserves a same-origin referrer for the completion document navigation", () => {

@@ -150,11 +150,12 @@ describe("single stronghold instance mode", () => {
     const mapped = await mapOidcIdentity(env, {
       issuer: "https://single-oidc.example",
       subject: "single-oidc-subject",
-      username: "singleoidcjoin",
+      username: "星尘·加入",
       display_name: "Single OIDC Join",
       email: null,
       email_verified: false,
     });
+    expect(mapped.localpart).toMatch(/^sso-[a-f0-9]{24}$/);
     const actor = `@${mapped.localpart}:local`;
     const config = getInstanceConfig(env);
     const root = { id: "root-id", name: "Configured root", slug: "medium5" };

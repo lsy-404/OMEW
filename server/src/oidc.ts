@@ -686,8 +686,8 @@ function preferredDisplayName(idToken: JWTPayload, userInfo: Record<string, unkn
 function preferredUsername(idToken: JWTPayload, userInfo: Record<string, unknown>): string | null {
   for (const value of [userInfo.preferred_username, idToken.preferred_username, userInfo.name, idToken.name]) {
     if (typeof value !== "string") continue;
-    const username = normalizeUsername(value.trim());
-    if (isValidUsername(username)) return username;
+    const username = [...normalizeUsername(value.replace(/\p{Cc}/gu, "").trim())].slice(0, 50).join("");
+    if (username) return username;
   }
   return null;
 }
@@ -748,6 +748,10 @@ async function existingOidcUser(env: Env, identity: OidcIdentity): Promise<OidcU
   return env.DB.prepare(USER_SELECT).bind(identity.issuer, identity.subject).first<OidcUserRow>();
 }
 
+function newSsoLocalpart(): string {
+  return `sso-${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`;
+}
+
 export async function mapOidcIdentity(env: Env, identity: OidcIdentity): Promise<OidcUserRow> {
   const existing = await existingOidcUser(env, identity);
   const timestamp = Date.now();
@@ -765,26 +769,33 @@ export async function mapOidcIdentity(env: Env, identity: OidcIdentity): Promise
   }
 
   if (!identity.username) throw new OidcError("SSO_USERNAME_INVALID", 400);
-  const conflict = await env.DB.prepare("SELECT localpart FROM users WHERE localpart = ?")
-    .bind(identity.username)
-    .first<{ localpart: string }>();
-  if (conflict) throw new OidcError("SSO_USERNAME_CONFLICT", 409);
+  const directLocalpart = isValidUsername(identity.username) ? identity.username : null;
+  for (let attempt = 0; attempt < (directLocalpart ? 1 : 4); attempt += 1) {
+    const localpart = directLocalpart ?? newSsoLocalpart();
+    const conflict = await env.DB.prepare("SELECT localpart FROM users WHERE localpart = ?")
+      .bind(localpart)
+      .first<{ localpart: string }>();
+    if (conflict) {
+      if (directLocalpart) throw new OidcError("SSO_USERNAME_CONFLICT", 409);
+      continue;
+    }
 
-  try {
-    await env.DB.batch([
-      env.DB.prepare(
-        "INSERT INTO users (localpart, display_name, status, created_at, server_role, email, email_verified) VALUES (?, ?, 'active', ?, 'user', ?, ?)",
-      ).bind(identity.username, identity.display_name, timestamp, identity.email, identity.email_verified ? 1 : 0),
-      env.DB.prepare(
-        "INSERT INTO oidc_identities (issuer, subject, localpart, username, created_at, last_login_at) VALUES (?, ?, ?, ?, ?, ?)",
-      ).bind(identity.issuer, identity.subject, identity.username, identity.username, timestamp, timestamp),
-    ]);
-    const created = await existingOidcUser(env, identity);
-    if (created) return created;
-  } catch {
-    const raced = await existingOidcUser(env, identity);
-    if (raced) return raced;
-    throw new OidcError("SSO_USERNAME_CONFLICT", 409);
+    try {
+      await env.DB.batch([
+        env.DB.prepare(
+          "INSERT INTO users (localpart, display_name, status, created_at, server_role, email, email_verified) VALUES (?, ?, 'active', ?, 'user', ?, ?)",
+        ).bind(localpart, identity.display_name, timestamp, identity.email, identity.email_verified ? 1 : 0),
+        env.DB.prepare(
+          "INSERT INTO oidc_identities (issuer, subject, localpart, username, created_at, last_login_at) VALUES (?, ?, ?, ?, ?, ?)",
+        ).bind(identity.issuer, identity.subject, localpart, identity.username, timestamp, timestamp),
+      ]);
+      const created = await existingOidcUser(env, identity);
+      if (created) return created;
+    } catch {
+      const raced = await existingOidcUser(env, identity);
+      if (raced) return raced;
+      if (directLocalpart) throw new OidcError("SSO_USERNAME_CONFLICT", 409);
+    }
   }
   throw new OidcError("SSO_IDENTITY_ERROR", 500);
 }
