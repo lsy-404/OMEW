@@ -1,5 +1,5 @@
 // `Env` itself is not declared here - it comes from wrangler-generated
-// worker-configuration.d.ts (run `npm run types` in server/ after touching
+// worker-configuration.d.ts (run `pnpm run types` in server/ after touching
 // wrangler.jsonc) plus the DEV_TOKEN_SECRET augmentation in src/env.d.ts.
 
 // Placeholder for this instance's own domain when no public deployment host is

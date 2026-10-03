@@ -3,18 +3,14 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "workspaces": [
-    "server",
-    "web"
-  ],
   "scripts": {
-    "build": "npm run build --workspace web",
-    "test": "vitest run",
+    "build": "pnpm --filter openmew-web run build",
+    "test": "vitest run --maxWorkers=2",
     "test:overture-package": "node test/overture-package.test.mjs",
     "test:watch": "vitest",
-    "typecheck": "npm run typecheck --workspace server && npx vue-tsc --noEmit -p web/tsconfig.app.json",
+    "typecheck": "pnpm --filter @openmew/server run typecheck && pnpm --filter openmew-web exec vue-tsc --noEmit -p tsconfig.app.json",
     "package:overture": "node scripts/build-overture-package.mjs",
-    "verify": "npm run types --workspace server && npm run typecheck && npm test && npm run build && npm run deploy:check --workspace server && npm run test:overture-package"
+    "verify": "pnpm --filter @openmew/server run types && pnpm run typecheck && pnpm test && pnpm run build && pnpm --filter @openmew/server run deploy:check && pnpm run test:overture-package"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.22.0",
@@ -26,5 +22,6 @@
     "@simplewebauthn/server": "^13.3.2",
     "jose": "^6.2.12",
     "otpauth": "^9.5.1"
-  }
+  },
+  "packageManager": "pnpm@10.34.6"
 }

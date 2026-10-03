@@ -1,0 +1,8 @@
+packages:
+  - server
+  - web
+strictDepBuilds: true
+allowBuilds:
+  esbuild: true
+  fsevents: true
+  workerd: true

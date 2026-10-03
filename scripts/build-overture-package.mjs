@@ -116,8 +116,8 @@ await mkdir(workerRoot, { recursive: true });
 await mkdir(assetsRoot, { recursive: true });
 await mkdir(migrationsRoot, { recursive: true });
 
-run("npm", ["run", "build"]);
-run("npx", ["wrangler", "deploy", "--dry-run", "--outdir", wranglerOut, "--config", join(root, "server", "wrangler.jsonc")]);
+run("pnpm", ["run", "build"]);
+run("pnpm", ["exec", "wrangler", "deploy", "--dry-run", "--outdir", wranglerOut, "--config", join(root, "server", "wrangler.jsonc")]);
 await cp(join(wranglerOut, "api.js"), join(workerRoot, "index.js"));
 await cp(join(root, "web", "dist"), assetsRoot, { recursive: true });
 
