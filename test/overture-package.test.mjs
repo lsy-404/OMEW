@@ -73,6 +73,7 @@ try {
     { name: "SSO_ISSUER", value: "${input:sso_issuer}" },
     { name: "SSO_CLIENT_ID", value: "${input:sso_client_id}" },
     { name: "SSO_PROVIDER_NAME", value: "${input:sso_provider_name}" },
+    { name: "SSO_NICKNAME_LOCKED", value: "${input:sso_nickname_locked}" },
   ]);
   assert.deepEqual(manifest.inputs.map((input) => input.id), [
     "domain",
@@ -82,6 +83,7 @@ try {
     "sso_issuer",
     "sso_client_id",
     "sso_client_secret",
+    "sso_nickname_locked",
     "sso_provider_name",
   ]);
   assert.equal(manifest.inputs.find((input) => input.id === "root_stronghold").visibleWhen.input, "instance_mode");

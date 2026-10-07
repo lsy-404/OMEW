@@ -14,7 +14,7 @@ import {
   type JWTPayload,
 } from "jose";
 import { base64UrlDecode, base64UrlEncode, signToken, verifyToken } from "./auth";
-import type { SsoRuntimeConfig } from "./config";
+import { getSsoConfig, type SsoRuntimeConfig } from "./config";
 import { HOME_DOMAIN, instanceDomain, type ServerRole, type SessionTokenClaims } from "./types";
 import { isValidEmail, isValidUsername, normalizeUsername } from "./users";
 
@@ -655,7 +655,7 @@ async function verifyIdToken(
   return payload;
 }
 
-async function fetchUserInfo(accessToken: string, metadata: OidcDiscovery, fetcher: OidcFetch, transaction?: OidcTransactionClaims): Promise<Record<string, unknown>> {
+async function fetchUserInfo(accessToken: string, metadata: OidcDiscovery, fetcher: OidcFetch, transaction?: Pick<OidcTransactionData, "dpop_private_jwk" | "dpop_public_jwk">): Promise<Record<string, unknown>> {
   const dpopHeader = transaction?.dpop_private_jwk && transaction?.dpop_public_jwk
     ? await createDpopProof(transaction.dpop_private_jwk, transaction.dpop_public_jwk, "GET", metadata.userinfo_endpoint)
     : undefined;
@@ -675,7 +675,7 @@ async function fetchUserInfo(accessToken: string, metadata: OidcDiscovery, fetch
 }
 
 function preferredDisplayName(idToken: JWTPayload, userInfo: Record<string, unknown>): string {
-  for (const value of [userInfo.name, userInfo.preferred_username, idToken.name, idToken.preferred_username]) {
+  for (const value of [userInfo.nickname, userInfo.name, idToken.nickname, idToken.name, userInfo.preferred_username, idToken.preferred_username]) {
     if (typeof value !== "string") continue;
     const trimmed = value.trim();
     if (trimmed) return [...trimmed].slice(0, 32).join("");
@@ -756,16 +756,18 @@ export async function mapOidcIdentity(env: Env, identity: OidcIdentity): Promise
   const existing = await existingOidcUser(env, identity);
   const timestamp = Date.now();
   if (existing) {
+    const nicknameLocked = getSsoConfig(env).nickname_locked;
+    const displayName = nicknameLocked ? identity.display_name : existing.display_name;
     const username = identity.username ?? existing.username;
     const email = identity.email ?? existing.email;
     const emailVerified = identity.email === null ? existing.email_verified : identity.email_verified ? 1 : 0;
     await env.DB.batch([
-      env.DB.prepare("UPDATE users SET display_name = ?, email = ?, email_verified = ? WHERE localpart = ?")
-        .bind(identity.display_name, email, emailVerified, existing.localpart),
+      env.DB.prepare("UPDATE users SET display_name = CASE WHEN ? THEN ? ELSE display_name END, email = ?, email_verified = ? WHERE localpart = ?")
+        .bind(nicknameLocked ? 1 : 0, identity.display_name, email, emailVerified, existing.localpart),
       env.DB.prepare("UPDATE oidc_identities SET username = ?, last_login_at = ? WHERE issuer = ? AND subject = ?")
         .bind(username, timestamp, identity.issuer, identity.subject),
     ]);
-    return { ...existing, username, display_name: identity.display_name, email, email_verified: emailVerified };
+    return { ...existing, username, display_name: displayName, email, email_verified: emailVerified };
   }
 
   if (!identity.username) throw new OidcError("SSO_USERNAME_INVALID", 400);
@@ -891,10 +893,23 @@ export async function refreshOidcSession(
     ? await verifyIdToken(idToken, "", config, metadata, fetcher, false)
     : { sub: row.bound_subject };
   if (typeof idClaims.sub !== "string" || idClaims.sub !== row.bound_subject) throw new OidcError("SSO_TOKEN_INVALID", 401);
-  const identity: OidcIdentity = { issuer: config.issuer, subject: idClaims.sub, username: preferredUsername(idClaims, {}), display_name: preferredDisplayName(idClaims, {}), email: typeof idClaims.email === "string" && isValidEmail(idClaims.email) ? idClaims.email : null, email_verified: idClaims.email_verified === true };
   const newRefresh = typeof payload.refresh_token === "string" ? payload.refresh_token : refreshToken;
   const accessTokenExpiresAt = typeof payload.expires_in === "number" ? nowS() + payload.expires_in : null;
   await env.DB.prepare("UPDATE oidc_sessions SET refresh_token_ciphertext = ?, id_token_ciphertext = ?, access_token_expires_at = ?, refresh_token_expires_at = ?, updated_at = ? WHERE session_jti = ? AND revoked_at IS NULL").bind(await tokenCiphertext(newRefresh, env.DEV_TOKEN_SECRET), idToken ? await tokenCiphertext(idToken, env.DEV_TOKEN_SECRET) : row.id_token_ciphertext, accessTokenExpiresAt, nowS() + 30 * 24 * 60 * 60, nowS(), session.jti).run();
+  const userInfo = await fetchUserInfo(payload.access_token, metadata, fetcher, dpop?.private && dpop.public
+    ? { dpop_private_jwk: dpop.private, dpop_public_jwk: dpop.public }
+    : undefined);
+  if (userInfo.sub !== row.bound_subject) throw new OidcError("SSO_TOKEN_INVALID", 401);
+  const rawEmail = typeof userInfo.email === "string" ? userInfo.email : idClaims.email;
+  const email = typeof rawEmail === "string" && rawEmail.length <= 254 && isValidEmail(rawEmail.trim()) ? rawEmail.trim() : null;
+  const identity: OidcIdentity = {
+    issuer: config.issuer,
+    subject: idClaims.sub,
+    username: preferredUsername(idClaims, userInfo),
+    display_name: preferredDisplayName(idClaims, userInfo),
+    email,
+    email_verified: email !== null && (userInfo.email_verified === true || (userInfo.email_verified === undefined && idClaims.email_verified === true)),
+  };
   const token = await signToken({ ...session, exp: nowS() + 24 * 60 * 60, jti: crypto.randomUUID() }, env.DEV_TOKEN_SECRET);
   await env.DB.prepare("UPDATE oidc_sessions SET session_jti = ?, updated_at = ? WHERE session_jti = ?").bind(sessionJti(token), nowS(), session.jti).run();
   return { token, identity };

@@ -34,6 +34,7 @@ export interface InstanceConfig {
   sso_enabled: boolean
   sso_provider_name: string
   sso_session_locked: boolean
+  sso_nickname_locked: boolean
   logo_url: string | null
   emotes_enabled: boolean
   builtin_emotes_enabled: boolean
@@ -62,6 +63,8 @@ export interface AdminInstanceConfig {
   sso_client_id: string
   sso_provider_name: string
   sso_client_secret_configured: boolean
+  sso_session_locked: boolean
+  sso_nickname_locked: boolean
 }
 
 export interface AdminInstanceConfigPatch extends Partial<AdminInstanceConfig> {

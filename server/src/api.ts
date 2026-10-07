@@ -110,7 +110,8 @@ export type AdminConfigEnvField =
   | "SSO_MODE"
   | "SSO_ISSUER"
   | "SSO_CLIENT_ID"
-  | "SSO_PROVIDER_NAME";
+  | "SSO_PROVIDER_NAME"
+  | "SSO_NICKNAME_LOCKED";
 export type AdminConfigPatchField = AdminConfigEnvField | "SSO_CLIENT_SECRET";
 const ADMIN_CONFIG_ENV_FIELDS = new Set<AdminConfigEnvField>([
   "INSTANCE_MODE",
@@ -128,6 +129,7 @@ const ADMIN_CONFIG_ENV_FIELDS = new Set<AdminConfigEnvField>([
   "SSO_ISSUER",
   "SSO_CLIENT_ID",
   "SSO_PROVIDER_NAME",
+  "SSO_NICKNAME_LOCKED",
 ]);
 const ADMIN_CONFIG_ALLOWED_FIELDS = new Set<AdminConfigPatchField>([
   ...ADMIN_CONFIG_ENV_FIELDS,
@@ -149,6 +151,7 @@ const ADMIN_CONFIG_ALIASES: Record<string, AdminConfigPatchField> = {
   sso_issuer: "SSO_ISSUER",
   sso_client_id: "SSO_CLIENT_ID",
   sso_provider_name: "SSO_PROVIDER_NAME",
+  sso_nickname_locked: "SSO_NICKNAME_LOCKED",
   sso_client_secret: "SSO_CLIENT_SECRET",
 };
 
@@ -168,6 +171,7 @@ const ADMIN_CONFIG_FIELDS: Record<AdminConfigEnvField, string> = {
   SSO_ISSUER: "sso_issuer",
   SSO_CLIENT_ID: "sso_client_id",
   SSO_PROVIDER_NAME: "sso_provider_name",
+  SSO_NICKNAME_LOCKED: "sso_nickname_locked",
 };
 
 function isConfigDomain(value: unknown, options: { wildcard?: boolean; requireDot?: boolean } = {}): value is string {
@@ -197,7 +201,7 @@ export function validateAdminConfigPatch(body: Record<string, unknown>, current:
       if (value !== "multi" && value !== "single") return apiError(400, "CONFIG_INVALID");
     } else if (key === "ROOT_STRONGHOLD") {
       if (typeof value !== "string" || (value !== "" && !ROOT_STRONGHOLD_RE.test(value))) return apiError(400, "CONFIG_INVALID");
-    } else if (key === "ALLOW_ROOT" || key === "ALLOW_GUEST_BROWSING") {
+    } else if (key === "ALLOW_ROOT" || key === "ALLOW_GUEST_BROWSING" || key === "SSO_NICKNAME_LOCKED") {
       if (typeof value !== "boolean") return apiError(400, "CONFIG_INVALID");
     } else if (key === "MAX_FILE_BYTES" || key === "USER_STORAGE_QUOTA_BYTES") {
       if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) return apiError(400, "CONFIG_INVALID");
@@ -274,7 +278,10 @@ function adminConfigSnapshot(
   patch: Partial<Record<AdminConfigEnvField, unknown>> = {},
   secretConfigured = Boolean(env.SSO_CLIENT_SECRET),
 ): Record<string, unknown> {
-  const sso = getSsoConfig(env);
+  const sso = getSsoConfig(Object.assign(Object.create(env), {
+    SSO_MODE: patch.SSO_MODE ?? env.SSO_MODE,
+    SSO_NICKNAME_LOCKED: patch.SSO_NICKNAME_LOCKED === undefined ? env.SSO_NICKNAME_LOCKED : patch.SSO_NICKNAME_LOCKED ? "1" : "0",
+  }));
   const snapshot: Record<string, unknown> = {
     ...getInstanceConfig(env),
     sso_mode: sso.mode,
@@ -282,10 +289,12 @@ function adminConfigSnapshot(
     sso_client_id: sso.client_id,
     sso_provider_name: sso.provider_name,
     sso_client_secret_configured: secretConfigured,
+    sso_session_locked: sso.session_locked,
   };
   for (const [field, value] of Object.entries(patch)) {
     snapshot[ADMIN_CONFIG_FIELDS[field as AdminConfigEnvField]] = value;
   }
+  snapshot.sso_nickname_locked = sso.nickname_locked;
   return snapshot;
 }
 
@@ -878,6 +887,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
       sso_enabled: sso.mode !== "disabled" && sso.configured,
       sso_provider_name: sso.provider_name,
       sso_session_locked: sso.session_locked,
+      sso_nickname_locked: sso.nickname_locked,
       ...getInstanceBranding(env),
     });
   }
@@ -1264,6 +1274,11 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
   if (method === "POST" && path === "/api/me/display-name") {
     const actor = await requireActor(request, env);
     if (!actor) return apiError(401, "AUTH_REQUIRED");
+    if (getSsoConfig(env).nickname_locked) {
+      const identity = await env.DB.prepare("SELECT 1 FROM oidc_identities WHERE localpart = ? LIMIT 1")
+        .bind(localpartOfActor(actor)).first();
+      if (identity) return apiError(403, "SSO_NICKNAME_LOCKED");
+    }
     const body = await readJsonBody(request);
     if (!body) return apiError(413, "PAYLOAD_INVALID");
 

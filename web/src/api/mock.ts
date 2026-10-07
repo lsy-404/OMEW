@@ -90,6 +90,8 @@ const config: AdminInstanceConfig = {
   sso_issuer: '',
   sso_client_id: '',
   sso_provider_name: 'SSO',
+  sso_session_locked: false,
+  sso_nickname_locked: false,
   sso_client_secret_configured: false,
 }
 
@@ -838,6 +840,7 @@ export const mockApi = {
       sso_enabled: config.sso_mode !== 'disabled' && config.sso_client_secret_configured && !!config.sso_issuer && !!config.sso_client_id,
       sso_provider_name: config.sso_provider_name,
       sso_session_locked: false,
+      sso_nickname_locked: config.sso_mode !== 'disabled' && config.sso_nickname_locked,
       logo_url: null,
       emotes_enabled: true,
       builtin_emotes_enabled: true,

@@ -81,6 +81,7 @@ const policyForm = reactive({
   maxFileBytes: 10_485_760,
   storageQuotaBytes: 209_715_200,
   ssoMode: 'disabled' as SsoMode,
+  ssoNicknameLocked: false,
   ssoIssuer: '',
   ssoClientId: '',
   ssoProviderName: '',
@@ -100,6 +101,7 @@ function setPolicyForm(value: AdminInstanceConfig) {
   policyForm.maxFileBytes = value.max_file_bytes
   policyForm.storageQuotaBytes = value.user_storage_quota_bytes
   policyForm.ssoMode = value.sso_mode
+  policyForm.ssoNicknameLocked = value.sso_nickname_locked
   policyForm.ssoIssuer = value.sso_issuer
   policyForm.ssoClientId = value.sso_client_id
   policyForm.ssoProviderName = value.sso_provider_name
@@ -176,6 +178,7 @@ async function savePolicy() {
       max_file_bytes: policyForm.maxFileBytes,
       user_storage_quota_bytes: policyForm.storageQuotaBytes,
       sso_mode: policyForm.ssoMode,
+      sso_nickname_locked: policyForm.ssoNicknameLocked,
       sso_issuer: policyForm.ssoIssuer,
       sso_client_id: policyForm.ssoClientId,
       sso_provider_name: policyForm.ssoProviderName,
@@ -820,6 +823,11 @@ watch(
                         />
                       </div>
                       <template v-if="policyForm.ssoMode !== 'disabled'">
+                        <label class="policy-form__check">
+                          <input v-model="policyForm.ssoNicknameLocked" type="checkbox" :disabled="policyForm.ssoMode === 'required' && config?.sso_session_locked" />
+                          跟随登录源昵称并锁定
+                        </label>
+                        <p class="field__hint">开启后，SSO 用户昵称在登录和会话刷新时同步，无法在此修改。嵌入式锁定模式强制开启。</p>
                         <div class="field">
                           <label class="field__label" for="policy-sso-issuer">OIDC Issuer</label>
                           <input id="policy-sso-issuer" v-model.trim="policyForm.ssoIssuer" type="url" placeholder="https://identity.example" />
@@ -901,6 +909,8 @@ watch(
                   <dd>{{ INSTANCE_MODE_LABEL[config.instance_mode] }}<template v-if="config.instance_mode === 'single'">（{{ config.root_stronghold || '未设置主据点' }}）</template></dd>
                   <dt>SSO 模式</dt>
                   <dd>{{ SSO_MODE_LABEL[config.sso_mode] }}<template v-if="config.sso_mode !== 'disabled'">（{{ config.sso_client_secret_configured ? '已配置' : '未配置' }}）</template></dd>
+                  <dt>SSO 昵称</dt>
+                  <dd>{{ config.sso_nickname_locked ? '跟随登录源并锁定' : '允许本地修改' }}</dd>
                   <dt>根节点（开放注册）</dt>
                   <dd>{{ config.allow_root ? '已开启' : '已关闭' }}</dd>
                   <dt>注册门槛</dt>

@@ -64,6 +64,10 @@ function onPanelTabSelect(item: { value: PanelTab }) {
 // only changes how the account is shown in member lists and message bylines.
 
 const displayName = ref('')
+const displayNameLocked = computed(() => auth.authSource.value === 'sso' && instanceConfig.value?.sso_nickname_locked === true)
+watch(() => auth.user.value?.display_name, (value) => {
+  if (displayNameLocked.value) displayName.value = value || auth.user.value?.username || ''
+})
 const avatar = ref<string | null>(null)
 const cover = ref<string | null>(null)
 const bio = ref('')
@@ -76,8 +80,6 @@ const displayNameSaved = ref(false)
 
 // called from the on-open reset below, alongside the other tabs' resets
 function resetDisplayNameForm() {
-  // a session stored before display_name existed carries only the username,
-  // which is also what the server seeds the display name with
   displayName.value = auth.user.value?.display_name || auth.user.value?.username || ''
   avatar.value = auth.user.value?.avatar ?? null
   cover.value = auth.user.value?.cover ?? null
@@ -125,7 +127,7 @@ function limitBio() {
 }
 
 async function submitDisplayName() {
-  if (!auth.token.value) return
+  if (!auth.token.value || displayNameLocked.value) return
   displayNameError.value = requiredMaxLengthError(displayName.value, 32, '显示名称')
   if (displayNameError.value) return
   displayNameSaving.value = true
@@ -135,8 +137,10 @@ async function submitDisplayName() {
     displayName.value = display_name
     auth.updateUser({ display_name })
     displayNameSaved.value = true
-  } catch {
-    displayNameError.value = '保存失败，请稍后重试'
+  } catch (error) {
+    displayNameError.value = error instanceof ApiRequestError && error.code === 'SSO_NICKNAME_LOCKED'
+      ? '昵称由登录来源管理，请在来源站点修改'
+      : '保存失败，请稍后重试'
   } finally {
     displayNameSaving.value = false
   }
@@ -459,7 +463,8 @@ watch(PANEL_TAB_OPTIONS, (options) => {
                 <form class="profile-form" @submit.prevent="submitDisplayName">
                   <div class="field">
                     <label class="field__label" for="profile-display-name">显示名称</label>
-                    <input id="profile-display-name" v-model="displayName" type="text" maxlength="32" />
+                    <input id="profile-display-name" v-model="displayName" type="text" maxlength="32" :readonly="displayNameLocked" />
+                    <p v-if="displayNameLocked" class="field__hint">昵称与 {{ instanceConfig?.sso_provider_name || '登录来源' }} 自动同步，请在来源站点修改。</p>
                     <p class="field__hint">成员列表与消息署名显示这个名字。用户名 {{ auth.user.value?.username }} 不可更改。</p>
                   </div>
                   <WinInfoBar v-if="displayNameError" :IsOpen="true" :IsClosable="false" Severity="Error">
@@ -468,7 +473,7 @@ watch(PANEL_TAB_OPTIONS, (options) => {
                   <WinInfoBar v-else-if="displayNameSaved" :IsOpen="true" :IsClosable="false" Severity="Success">
                     已保存
                   </WinInfoBar>
-                  <WinButton Style="AccentButtonStyle" :IsEnabled="!displayNameSaving" @click="submitDisplayName">
+                  <WinButton v-if="!displayNameLocked" Style="AccentButtonStyle" :IsEnabled="!displayNameSaving" @click="submitDisplayName">
                     {{ displayNameSaving ? '保存中…' : '保存' }}
                   </WinButton>
                 </form>

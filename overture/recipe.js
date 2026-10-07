@@ -16,6 +16,8 @@ function deploymentInputs(inputs = {}) {
 
   const ssoMode = trimmed(inputs.sso_mode) || "disabled";
   if (!["disabled", "optional", "required"].includes(ssoMode)) throw new Error("Invalid single sign-on mode");
+  const nicknameLocked = trimmed(inputs.sso_nickname_locked) || "0";
+  if (!["0", "1"].includes(nicknameLocked)) throw new Error("Invalid SSO nickname policy");
   const issuer = trimmed(inputs.sso_issuer);
   const clientId = trimmed(inputs.sso_client_id);
   const clientSecret = typeof inputs.sso_client_secret === "string" ? inputs.sso_client_secret : "";

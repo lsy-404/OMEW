@@ -39,7 +39,11 @@ describe("OMEW OIDC client", () => {
     env.SSO_PROVIDER_NAME = "";
   });
 
-  it("completes discovery, PKCE, nonce, ID token verification, and UserInfo mapping", async () => {
+  it.each([
+    { profile: { nickname: "星尘·同好", name: "来源姓名" }, displayName: "星尘·同好" },
+    { profile: { name: "来源姓名" }, displayName: "来源姓名" },
+    { profile: {}, displayName: "令牌昵称" },
+  ])("completes verified OIDC login using profile %j", async ({ profile, displayName }) => {
     const request = new Request("http://localhost/api/auth/oidc/start?return_to=%2F");
     const discovery = {
       issuer: ISSUER,
@@ -68,6 +72,7 @@ describe("OMEW OIDC client", () => {
     const idToken = await new SignJWT({
       nonce,
       name: "统一用户",
+      nickname: "令牌昵称",
       preferred_username: "星尘·同好",
       email: "sso-user@example.com",
       email_verified: true,
@@ -93,7 +98,7 @@ describe("OMEW OIDC client", () => {
         return Response.json({ access_token: "access-token", token_type: "Bearer", id_token: idToken });
       }
       if (url === `${ISSUER}/jwks.json`) return Response.json({ keys: [publicJwk] });
-      if (url === `${ISSUER}/userinfo`) return Response.json({ sub: "provider-user", preferred_username: "星尘·同好" });
+      if (url === `${ISSUER}/userinfo`) return Response.json({ sub: "provider-user", preferred_username: "星尘·同好", ...profile });
       throw new Error(`unexpected upstream URL: ${url}`);
     });
 
@@ -102,7 +107,7 @@ describe("OMEW OIDC client", () => {
       issuer: ISSUER,
       subject: "provider-user",
       username: "星尘·同好",
-      display_name: "星尘·同好",
+      display_name: displayName,
       email: "sso-user@example.com",
       email_verified: true,
     });

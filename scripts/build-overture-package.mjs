@@ -186,6 +186,7 @@ const manifest = {
       { name: "SSO_ISSUER", value: "${input:sso_issuer}" },
       { name: "SSO_CLIENT_ID", value: "${input:sso_client_id}" },
       { name: "SSO_PROVIDER_NAME", value: "${input:sso_provider_name}" },
+      { name: "SSO_NICKNAME_LOCKED", value: "${input:sso_nickname_locked}" },
     ],
   },
   inputs: [
@@ -241,6 +242,18 @@ const manifest = {
       kind: "password",
       label: { en: "OIDC client secret", "zh-CN": "OIDC client secret" },
       help: { en: "Required unless SSO is off. Written only to the target Worker's encrypted Secrets store.", "zh-CN": "SSO 未关闭时必填；只写入目标 Worker 的加密 Secrets。" },
+    },
+    {
+      id: "sso_nickname_locked",
+      kind: "select",
+      default: "0",
+      required: true,
+      options: [
+        { value: "0", label: { en: "Allow local nickname changes", "zh-CN": "允许本地修改昵称" } },
+        { value: "1", label: { en: "Sync and lock provider nickname", "zh-CN": "跟随来源昵称并锁定" } },
+      ],
+      label: { en: "SSO nickname policy", "zh-CN": "SSO 昵称策略" },
+      help: { en: "Embedded SSO-only instances always sync and lock nicknames.", "zh-CN": "嵌入式锁定模式始终强制跟随来源昵称。" },
     },
     {
       id: "sso_provider_name",

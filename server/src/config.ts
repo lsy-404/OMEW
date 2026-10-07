@@ -33,6 +33,7 @@ export interface SsoRuntimeConfig {
   use_dpop: boolean;
   jar_private_jwk: string;
   session_locked: boolean;
+  nickname_locked: boolean;
 }
 
 function parseBool(value: string | undefined, fallback: boolean): boolean {
@@ -112,6 +113,7 @@ export function getSsoConfig(env: Env): SsoRuntimeConfig {
   const clientId = env.SSO_CLIENT_ID?.trim() ?? "";
   const clientSecret = env.SSO_CLIENT_SECRET ?? "";
   const providerName = env.SSO_PROVIDER_NAME?.trim() || "SSO";
+  const sessionLocked = mode === "required" && Boolean(env.EMBED_ORIGIN?.trim());
   return {
     mode,
     issuer,
@@ -123,7 +125,8 @@ export function getSsoConfig(env: Env): SsoRuntimeConfig {
     use_jarm: env.SSO_USE_JARM === "1",
     use_dpop: env.SSO_USE_DPOP === "1",
     jar_private_jwk: env.SSO_JAR_PRIVATE_JWK?.trim() ?? "",
-    session_locked: mode === "required" && Boolean(env.EMBED_ORIGIN?.trim()),
+    session_locked: sessionLocked,
+    nickname_locked: mode !== "disabled" && (sessionLocked || parseBool(env.SSO_NICKNAME_LOCKED, false)),
   };
 }
 

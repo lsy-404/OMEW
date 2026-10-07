@@ -29,6 +29,7 @@
     "SSO_MODE": "disabled",
     "SSO_ISSUER": "",
     "SSO_CLIENT_ID": "",
+    "SSO_NICKNAME_LOCKED": "0",
     "SSO_PROVIDER_NAME": "",
     "SSO_USE_PAR": "1",
     "SSO_USE_JARM": "0",
