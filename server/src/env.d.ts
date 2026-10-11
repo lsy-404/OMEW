@@ -7,6 +7,7 @@
 interface Env {
   ASSETS: Fetcher;
   DEV_TOKEN_SECRET: string;
+  TURNSTILE_SECRET_KEY?: string;
   SSO_MODE?: string;
   SSO_ISSUER?: string;
   SSO_CLIENT_ID?: string;
@@ -35,6 +36,7 @@ declare namespace Cloudflare {
   interface Env {
     ASSETS: Fetcher;
     DEV_TOKEN_SECRET: string;
+    TURNSTILE_SECRET_KEY?: string;
     SSO_MODE?: string;
     SSO_ISSUER?: string;
     SSO_CLIENT_ID?: string;

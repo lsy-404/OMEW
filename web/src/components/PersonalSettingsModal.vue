@@ -9,7 +9,7 @@ import { useGifPlayback, type GifPlaybackMode } from '../composables/useGifPlayb
 import { useInstanceConfig } from '../composables/useInstanceConfig'
 import { useTheme, type ThemeMode } from '../composables/useTheme'
 import { envelopeToCiphertextField, parseOwnershipEnvelope, resealOwnershipKey, unsealOwnershipKey } from '../crypto/ownershipKey'
-import { passwordError, requiredError, requiredMaxLengthError } from '../utils/validate'
+import { emailError, passwordError, requiredError, requiredMaxLengthError } from '../utils/validate'
 import { WinButton, WinInfoBar, WinSelectorBar } from '../vendor/winui'
 import AppIcon from './icons/AppIcon.vue'
 import PersonalAvatarUploader from './PersonalAvatarUploader.vue'
@@ -212,6 +212,56 @@ const pwForm = reactive({ oldPassword: '', newPassword: '', confirmPassword: '' 
 const pwError = ref('')
 const pwSuccess = ref(false)
 const pwBusy = ref(false)
+const emailVerificationBusy = ref(false)
+const emailVerificationError = ref('')
+const emailVerificationSent = ref(false)
+const emailForm = reactive({ email: '' })
+watch(() => auth.user.value?.email, (email) => { emailForm.email = email ?? '' }, { immediate: true })
+
+async function submitAccountEmail() {
+  if (!auth.token.value || emailVerificationBusy.value) return
+  const validation = emailError(emailForm.email)
+  if (validation) {
+    emailVerificationError.value = validation
+    return
+  }
+  emailVerificationBusy.value = true
+  emailVerificationError.value = ''
+  emailVerificationSent.value = false
+  try {
+    const result = await api.setAccountEmail(auth.token.value, emailForm.email.trim())
+    auth.updateUser({ email: emailForm.email.trim(), email_verified: result.already_verified === true })
+    emailVerificationSent.value = result.verification_required === true
+  } catch (error) {
+    emailVerificationError.value = error instanceof ApiRequestError && error.code === 'EMAIL_TAKEN'
+      ? '该邮箱已关联到其他账号。'
+      : error instanceof ApiRequestError && error.code === 'EMAIL_RATE_LIMITED'
+        ? '发送过于频繁，请稍后重试。'
+        : error instanceof ApiRequestError && error.code === 'EMAIL_SEND_FAILED'
+          ? '验证邮件发送失败，请稍后重试。'
+          : '邮箱更新失败，请稍后重试。'
+  } finally {
+    emailVerificationBusy.value = false
+  }
+}
+
+async function resendEmailVerification() {
+  if (!auth.token.value || emailVerificationBusy.value) return
+  emailVerificationBusy.value = true
+  emailVerificationError.value = ''
+  emailVerificationSent.value = false
+  try {
+    const result = await api.resendAccountVerification(auth.token.value)
+    emailVerificationSent.value = !result.already_verified
+    if (result.already_verified) auth.updateUser({ email_verified: true })
+  } catch (error) {
+    emailVerificationError.value = error instanceof ApiRequestError && error.code === 'EMAIL_RATE_LIMITED'
+      ? '发送过于频繁，请稍后重试。'
+      : '验证邮件发送失败，请稍后重试。'
+  } finally {
+    emailVerificationBusy.value = false
+  }
+}
 
 function resetPasswordForm() {
   pwForm.oldPassword = ''
@@ -500,6 +550,40 @@ watch(PANEL_TAB_OPTIONS, (options) => {
 
               <!-- 修改密码 -->
               <section v-if="securityTab === 'password'" class="settings-section">
+                <div class="email-verification">
+                  <div class="field">
+                    <label class="field__label" for="account-email">账号邮箱</label>
+                    <input id="account-email" v-model.trim="emailForm.email" type="email" autocomplete="email" />
+                  </div>
+                  <WinInfoBar v-if="auth.user.value?.email_verified" :IsOpen="true" :IsClosable="false" :IsIconVisible="false" Severity="Success">
+                    邮箱已验证
+                  </WinInfoBar>
+                  <WinInfoBar v-else-if="auth.user.value?.email" :IsOpen="true" :IsClosable="false" :IsIconVisible="false" Severity="Informational">
+                    邮箱尚未验证；密码恢复邮件只会发送到已验证的邮箱。
+                  </WinInfoBar>
+                  <template v-if="!auth.user.value?.email_verified">
+                    <WinInfoBar :IsOpen="true" :IsClosable="false" :IsIconVisible="false" Severity="Informational">
+                      保存后会向该地址发送验证链接。
+                    </WinInfoBar>
+                  </template>
+                  <WinInfoBar v-if="emailVerificationError" :IsOpen="true" :IsClosable="false" :IsIconVisible="false" Severity="Error">
+                    {{ emailVerificationError }}
+                  </WinInfoBar>
+                  <WinInfoBar v-if="emailVerificationSent" :IsOpen="true" :IsClosable="false" :IsIconVisible="false" Severity="Success">
+                    验证邮件已发送，请检查收件箱。
+                  </WinInfoBar>
+                  <div class="email-verification__actions">
+                    <WinButton Style="DefaultButtonStyle" :IsEnabled="!emailVerificationBusy" @click="submitAccountEmail">
+                      {{ emailVerificationBusy ? '正在发送…' : auth.user.value?.email ? '保存并验证邮箱' : '添加并验证邮箱' }}
+                    </WinButton>
+                    <WinButton
+                      v-if="auth.user.value?.email && !auth.user.value.email_verified"
+                      Style="SubtleButtonStyle"
+                      :IsEnabled="!emailVerificationBusy"
+                      @click="resendEmailVerification"
+                    >重新发送验证邮件</WinButton>
+                  </div>
+                </div>
                 <form class="password-form" @submit.prevent="submitPasswordChange">
                   <div class="field">
                     <label class="field__label" for="pw-old">当前密码</label>
