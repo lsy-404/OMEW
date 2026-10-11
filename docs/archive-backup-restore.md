@@ -24,6 +24,12 @@ The first endpoint snapshots the room's complete RoomDO SQLite tables to a gzip 
 
 These snapshots cover the RoomDO database. Cold archive objects remain in R2 and their range/search metadata remains in D1, so disaster recovery also requires the original R2 archive objects and a D1 dump. Room snapshots are not portable between rooms or deployments.
 
+## Stronghold governance snapshots
+
+Stronghold governance state is a separate Durable Object database. Its snapshot includes the complete SQL columns and rows from `config`, `room`, `member`, `ban`, and `tip`, plus `member_migration` and `control_event` when those tables exist. It preserves the original stronghold ID, owner membership, room registration, restrictions, bans, and tips. Restore validates the complete gzip stream, digest, table allowlist, schema columns, owner row, and stronghold identity before writing; it only accepts a target whose governance tables are empty.
+
+For a full recovery, restore the D1 database and R2 bucket, then restore the StrongholdDO governance snapshot before restoring each RoomDO snapshot. Use the original stronghold ID and instance domain. Configure the recovered instance in multi mode before starting Workers so single-mode auto-bootstrap cannot create replacement state. Preserve `DEV_TOKEN_SECRET` and the other service secrets used by the deployment. Stronghold governance snapshots do not contain room messages or archive shard bodies; RoomDO snapshots and the original R2 archive objects are still required.
+
 ## D1 export and restore
 
 D1's `wrangler d1 export` does not export a database containing virtual tables. The project script works around that limitation by exporting the ordinary D1 tables individually. `archive_document` is the durable source for archived search text; the script rebuilds the FTS5 index after importing it.
