@@ -36,6 +36,7 @@ let historyCursor: number | null = null
 
 let transport: RoomTransport | null = null
 let roomKey = ''
+let roomGeneration = 0
 let ackTimers = new Map<string, ReturnType<typeof setTimeout>>()
 let guestPollTimer: ReturnType<typeof setInterval> | null = null
 
@@ -107,14 +108,17 @@ function startGuestPolling(nodeId: string, resId: string, key: string) {
 }
 
 async function connectRoom(nodeId: string, room: RoomSummary, readOnly: boolean) {
-  const key = `${nodeId}/${room.id}/${readOnly ? 'preview' : 'member'}`
+  const auth = useAuth()
+  const key = `${nodeId}/${room.id}/${readOnly ? 'preview' : 'member'}/${auth.user.value?.actor ?? 'guest'}`
   if (key === roomKey) return
+  const generation = ++roomGeneration
   roomKey = key
   transport?.close()
   transport = null
   stopGuestPolling()
   items.value = []
   pending.value = []
+  pendingReactionOps.clear()
   hasMoreHistory.value = true
   historyCursor = null
   connected.value = false
@@ -122,10 +126,8 @@ async function connectRoom(nodeId: string, room: RoomSummary, readOnly: boolean)
   for (const t of ackTimers.values()) clearTimeout(t)
   ackTimers = new Map()
 
-  const auth = useAuth()
-
   await loadHistory(nodeId, room.id, null)
-  if (roomKey !== key) return // superseded by another switch while awaiting history
+  if (generation !== roomGeneration) return
 
   if (readOnly || !auth.token.value) {
     // Public preview: read-only, no room WS; light polling provides updates.
@@ -141,15 +143,19 @@ async function connectRoom(nodeId: string, room: RoomSummary, readOnly: boolean)
     initialLastSeq: items.value[items.value.length - 1]?.seq ?? 0,
     handlers: {
       onOpen: () => {
+        if (generation !== roomGeneration) return
         connected.value = true
       },
       onClose: () => {
+        if (generation !== roomGeneration) return
         connected.value = false
       },
       onToken: (claims) => {
+        if (generation !== roomGeneration) return
         muted.value = (claims.deny & DENY_CHANNEL_SPEAK) !== 0
       },
       onAck: (ack) => {
+        if (generation !== roomGeneration) return
         if (!ack.client_id) return
         clearAckTimer(ack.client_id)
         // the room broadcast excludes the sender, so the acked message must be
@@ -171,12 +177,13 @@ async function connectRoom(nodeId: string, room: RoomSummary, readOnly: boolean)
         }
         pending.value = pending.value.filter((p) => p.clientId !== ack.client_id)
       },
-      onItem: (item) => upsertItem(item),
+      onItem: (item) => { if (generation === roomGeneration) upsertItem(item) },
       // absolute snapshot (m0-protocol §3.2a): overwrite entries with the
       // authoritative count. Frames carry actor/name/op, so any connection of
       // the same account - this tab or another - derives `mine` directly;
       // other actors' toggles leave `mine` untouched.
       onReaction: (frame) => {
+        if (generation !== roomGeneration) return
         const idx = items.value.findIndex((i) => i.seq === frame.target_seq)
         if (idx < 0) return
         let mine = items.value[idx]!.reactions?.mine ?? []
@@ -190,10 +197,12 @@ async function connectRoom(nodeId: string, room: RoomSummary, readOnly: boolean)
         items.value[idx] = { ...items.value[idx]!, reactions: { entries: frame.entries, mine } }
       },
       onUpdate: (u) => {
+        if (generation !== roomGeneration) return
         const idx = items.value.findIndex((i) => i.seq === u.target_seq)
         if (idx >= 0) items.value[idx] = { ...items.value[idx]!, body: u.body as RoomItem['body'], edited_at: u.edited_at }
       },
       onDelete: (d) => {
+        if (generation !== roomGeneration) return
         items.value = items.value.filter((i) => i.seq !== d.target_seq)
       },
       // reaction rejections carry target_seq + name (m0-protocol §3.2a) so the
@@ -205,6 +214,7 @@ async function connectRoom(nodeId: string, room: RoomSummary, readOnly: boolean)
       // still-sending one is the closest match and self-corrects on the next
       // successful send.
       onError: (e) => {
+        if (generation !== roomGeneration) return
         if (e.target_seq != null && e.name) {
           rollbackReaction(e.target_seq, e.name)
           return
@@ -220,6 +230,7 @@ async function connectRoom(nodeId: string, room: RoomSummary, readOnly: boolean)
         }
       },
       onResyncGap: () => {
+        if (generation !== roomGeneration) return
         void loadHistory(nodeId, room.id, null)
       },
     },
@@ -228,10 +239,12 @@ async function connectRoom(nodeId: string, room: RoomSummary, readOnly: boolean)
 }
 
 async function loadHistory(nodeId: string, resId: string, before: number | null) {
+  const generation = roomGeneration
   const auth = useAuth()
   historyLoading.value = true
   try {
     const result = await api.getRoomHistory(auth.token.value, nodeId, resId, before, HISTORY_PAGE_SIZE)
+    if (generation !== roomGeneration) return
     const page = result.items
     historyCursor = result.next_before
     hasMoreHistory.value = result.has_more
@@ -245,25 +258,29 @@ async function loadHistory(nodeId: string, resId: string, before: number | null)
     // leave whatever we already had - the compose box still works even if
     // history couldn't be fetched (e.g. transient network blip).
   } finally {
-    historyLoading.value = false
+    if (generation === roomGeneration) historyLoading.value = false
   }
 }
 
 export function useChatRoom() {
+  const auth = useAuth()
   const { selectedNodeId, isReadOnly } = useStronghold()
   const { selectedChannel } = useChannel()
 
   watch(
-    [selectedNodeId, selectedChannel, isReadOnly],
+    [selectedNodeId, selectedChannel, isReadOnly, () => auth.user.value?.actor],
     ([nodeId, room, readOnly]) => {
       if (nodeId && room) void connectRoom(nodeId, room, readOnly)
       else {
+        roomGeneration++
         transport?.close()
         transport = null
         stopGuestPolling()
         roomKey = ''
         items.value = []
         pending.value = []
+        pendingReactionOps.clear()
+        historyLoading.value = false
       }
     },
     { immediate: true },
@@ -349,6 +366,7 @@ export function useChatRoom() {
   }
 
   async function editMessage(seq: number, text: string): Promise<boolean> {
+    const generation = roomGeneration
     const auth = useAuth()
     const nodeId = selectedNodeId.value
     const room = selectedChannel.value
@@ -360,6 +378,7 @@ export function useChatRoom() {
       // original body's media along so it doesn't get silently dropped.
       const body: Record<string, unknown> = { ...items.value[idx]!.body, text: trimmed }
       await api.editItem(auth.token.value, nodeId, room.id, seq, body)
+      if (generation !== roomGeneration) return true
       items.value[idx] = { ...items.value[idx]!, body: body as RoomItem['body'], edited_at: Date.now() }
       return true
     } catch {
@@ -383,12 +402,14 @@ export function useChatRoom() {
   }
 
   async function retractMessage(seq: number): Promise<boolean> {
+    const generation = roomGeneration
     const auth = useAuth()
     const nodeId = selectedNodeId.value
     const room = selectedChannel.value
     if (!auth.token.value || !nodeId || !room) return false
     try {
       await api.retractItem(auth.token.value, nodeId, room.id, seq)
+      if (generation !== roomGeneration) return true
       items.value = items.value.filter((i) => i.seq !== seq)
       return true
     } catch {

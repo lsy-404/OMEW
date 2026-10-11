@@ -67,6 +67,14 @@
   "r2_buckets": [
     { "binding": "MEDIA", "bucket_name": "stardust-omew-media" }
   ],
+  "queues": {
+    "producers": [{ "binding": "FEDERATION_OUT", "queue": "stardust-omew-federation" }, { "binding": "FEDERATION_DEAD", "queue": "stardust-omew-federation-dead" }],
+    "consumers": [
+      { "queue": "stardust-omew-federation", "max_batch_size": 20, "max_retries": 8, "dead_letter_queue": "stardust-omew-federation-dead" },
+      { "queue": "stardust-omew-federation-dead", "max_batch_size": 20 }
+    ]
+  },
+  "triggers": { "crons": ["*/5 * * * *"] },
   "assets": {
     "directory": "../web/dist",
     "binding": "ASSETS",

@@ -36,6 +36,7 @@ onBeforeUnmount(() => { void voice.leave() })
         </li>
       </ul>
       <div class="voice-panel__actions">
+        <WinButton v-if="voice.audioBlocked.value" Style="AccentButtonStyle" @click="voice.resumeAudio">开启声音</WinButton>
         <WinButton
           v-if="voice.canPublish.value"
           Style="SubtleButtonStyle"

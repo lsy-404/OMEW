@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import RequestJoin from './RequestJoin.vue'
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api, ApiRequestError } from '../api'
 import type { DirectoryEntry } from '../api/types'
@@ -104,6 +105,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
                 </WinButton>
               </li>
             </ul>
+            <RequestJoin />
           </div>
         </div>
       </div>

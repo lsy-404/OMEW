@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, ref, watch } from 'vue'
 import { api } from '../api'
 import { EMPTY_STATE } from '../assets/mew'
 import { useAuth } from '../composables/useAuth'
@@ -23,7 +23,7 @@ import AppIcon from './icons/AppIcon.vue'
 import ItemContextMenu from './ItemContextMenu.vue'
 import ImageEditor from './ImageEditor.vue'
 import MessageBubble, { type MessageVM } from './MessageBubble.vue'
-import VoicePanel from './VoicePanel.vue'
+const VoicePanel = defineAsyncComponent(() => import('./VoicePanel.vue'))
 
 const auth = useAuth()
 const { packs } = useEmotes()

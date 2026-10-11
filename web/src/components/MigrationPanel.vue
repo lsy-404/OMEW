@@ -229,11 +229,15 @@ async function executeMigration() {
             history,
             homeRelease,
           );
-          await api("/api/me/migration/edge-proof", {
-            peer: edge.peer,
-            proof: edgeProof,
-          });
-          edge.state = "resolved";
+          const delivery = await api<{ state: string; error?: string }>(
+            "/api/me/migration/edge-proof",
+            {
+              peer: edge.peer,
+              proof: edgeProof,
+            },
+          );
+          edge.state = delivery.state;
+          edge.error = delivery.error;
         } catch (e) {
           edge.error = String(e);
           edge.state = "pending";
@@ -251,8 +255,13 @@ async function refresh() {
   await run(async () => {
     const result = await api<{
       edges: Array<{ peer: string; state: string; error?: string }>;
+      migrations: Array<{ old_actor: string; state: string; error?: string }>;
     }>("/api/me/migration/status");
     edges.value = result.edges;
+    const current = result.migrations.find(
+      (migration) => migration.old_actor === oldActor.value,
+    );
+    if (current) status.value = current.error ?? current.state;
   });
 }
 async function exportRelease() {

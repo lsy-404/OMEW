@@ -58,6 +58,26 @@ export async function federationRoutes(
     method === "POST"
   )
     return migrationRequest(request, env, session?.actor ?? null);
+  if (path === "/migration/status" && method === "GET") {
+    const caller = await verifyRequest(env, request);
+    const row = await env.DB.prepare(
+      "SELECT mode,state,proof,effective_at FROM account_migrations WHERE old_actor=? AND new_actor=?",
+    )
+      .bind(url.searchParams.get("old"), caller.actor)
+      .first<{
+        mode: string;
+        state: string;
+        proof: string;
+        effective_at: number;
+      }>();
+    if (!row || JSON.parse(row.proof).nonce !== url.searchParams.get("nonce"))
+      throw new ProtocolError(404, "OMEW_NOT_FOUND");
+    return protocolResponse({
+      mode: row.mode,
+      state: row.state,
+      effective_at: row.effective_at,
+    });
+  }
   if (path === "/.well-known/openmew/keys" && method === "GET")
     return protocolResponse(await ownKeys(env));
   if (path === "/.well-known/openmew/instance" && method === "GET") {
@@ -71,7 +91,7 @@ export async function federationRoutes(
         instance: instanceDomain(env),
         name: env.INSTANCE_NAME ?? "OMEW",
         software: "openmew",
-        version: "1.1.0",
+        version: "1.0.0",
         capabilities: [
           "federation.session",
           "federation.history",
@@ -126,27 +146,25 @@ export async function federationRoutes(
     )
       throw new ProtocolError(403, "OMEW_ROOM_NOT_FOUND");
     const expiredAt = Date.now() + Number(body.ttl) * 1000;
-    const existing = await env.DB.prepare(
-      "SELECT room FROM federation_host_subscriptions WHERE peer=? AND room=?",
+    const reserved = await env.DB.prepare(
+      "INSERT INTO federation_host_subscriptions(peer,room,expires_at) SELECT ?,?,? WHERE (SELECT COUNT(*) FROM federation_host_subscriptions WHERE peer=? AND expires_at>?)<100 OR EXISTS(SELECT 1 FROM federation_host_subscriptions WHERE peer=? AND room=? AND expires_at>?) ON CONFLICT(peer,room) DO UPDATE SET expires_at=excluded.expires_at RETURNING room",
     )
-      .bind(body.origin, body.room)
+      .bind(
+        body.origin,
+        body.room,
+        expiredAt,
+        body.origin,
+        Date.now(),
+        body.origin,
+        body.room,
+        Date.now(),
+      )
       .first();
-    const count = await env.DB.prepare(
-      "SELECT COUNT(*) AS count FROM federation_host_subscriptions WHERE peer=? AND expires_at>?",
-    )
-      .bind(body.origin, Date.now())
-      .first<{ count: number }>();
-    if (!existing && (count?.count ?? 0) >= 100)
-      throw new ProtocolError(429, "OMEW_SUBSCRIPTION_QUOTA");
+    if (!reserved) throw new ProtocolError(429, "OMEW_SUBSCRIPTION_QUOTA");
     const latest = await env.ROOM_DO.getByName(body.room).registerSubscription(
       body.origin,
       expiredAt,
     );
-    await env.DB.prepare(
-      "INSERT INTO federation_host_subscriptions(peer,room,expires_at) VALUES (?,?,?) ON CONFLICT(peer,room) DO UPDATE SET expires_at=excluded.expires_at",
-    )
-      .bind(body.origin, body.room, expiredAt)
-      .run();
     return protocolResponse(
       await signDocument(env, "openmew/subscription-response/v1", {
         origin: instanceDomain(env),
@@ -188,7 +206,7 @@ export async function federationRoutes(
       !room ||
       room.restricted ||
       (room.type === "section" ? "sec" : "ch") !== kind ||
-      (config.visibility !== "public" && (!member || member.banned_at))
+      config.visibility !== "public"
     )
       throw new ProtocolError(403, "OMEW_ROOM_NOT_FOUND");
     if (member?.banned_at) throw new ProtocolError(403, "OMEW_BANNED");
@@ -211,7 +229,20 @@ export async function federationRoutes(
       after,
       before,
       limit,
+      url.searchParams.has("snapshot_before")
+        ? Number(url.searchParams.get("snapshot_before"))
+        : null,
     );
+    const [latestConfig, latestRoom] = await Promise.all([
+      stub.getConfig(),
+      stub.getRoom(resId!),
+    ]);
+    if (
+      latestConfig?.visibility !== "public" ||
+      !latestRoom ||
+      latestRoom.restricted
+    )
+      throw new ProtocolError(403, "OMEW_ROOM_NOT_FOUND");
     return protocolResponse(
       await signDocument(env, "openmew/history/v1", result),
     );
@@ -248,6 +279,29 @@ export async function federationRoutes(
           .all()
       ).results,
     });
+  if (path === "/api/federation/join-request" && method === "POST") {
+    const body = await boundedJson(request);
+    if (
+      !object(body) ||
+      typeof body.peer !== "string" ||
+      typeof body.stronghold !== "string" ||
+      !/^[a-z0-9][a-z0-9-]{0,63}$/.test(body.stronghold)
+    )
+      throw new ProtocolError(400, "OMEW_MALFORMED");
+    if (domain(session.actor) !== instanceDomain(env))
+      throw new ProtocolError(403, "OMEW_FORBIDDEN");
+    await queueDelivery(
+      env,
+      body.peer,
+      await newEvent(
+        env,
+        "member.join_request",
+        { stronghold: body.stronghold, subject: session.actor },
+        { actor: session.actor },
+      ),
+    );
+    return protocolResponse({ state: "pending" }, 202);
+  }
   if (path === "/api/federation/assertion" && method === "POST") {
     const body = await boundedJson(request);
     if (!object(body) || typeof body.peer !== "string")
@@ -371,6 +425,23 @@ export async function federationRoutes(
       )
         .bind(body.peer, Date.now())
         .run();
+      const { results: subscriptions } = await env.DB.prepare(
+        "SELECT room FROM federation_host_subscriptions WHERE peer=?",
+      )
+        .bind(body.peer)
+        .all<{ room: string }>();
+      for (const subscription of subscriptions)
+        await env.ROOM_DO.getByName(subscription.room).removeSubscription(
+          body.peer,
+        );
+      await env.DB.batch([
+        env.DB.prepare(
+          "DELETE FROM federation_host_subscriptions WHERE peer=?",
+        ).bind(body.peer),
+        env.DB.prepare(
+          "UPDATE federation_delivery SET state='dead' WHERE peer=? AND state='pending'",
+        ).bind(body.peer),
+      ]);
       const { results } = await env.DB.prepare(
         "SELECT actor FROM guest_identity WHERE registered_origin=?",
       )
@@ -430,18 +501,27 @@ export async function federationRoutes(
       domain(session.actor) !== instanceDomain(env)
     )
       throw new ProtocolError(400, "OMEW_MALFORMED");
+    await env.DB.prepare(
+      "INSERT INTO federation_local_profile(actor,moved_to,version) VALUES (?,?,1) ON CONFLICT(actor) DO UPDATE SET moved_to=excluded.moved_to,version=version+1",
+    )
+      .bind(session.actor, body.new)
+      .run();
     const profile = await localProfile(env, session.actor);
-    return protocolResponse(
-      await newEvent(
-        env,
-        "user.update",
-        {
-          profile_version: Number(profile.profile_version) + 1,
-          moved_to: body.new,
-        },
-        { actor: session.actor },
-      ),
+    const event = await newEvent(
+      env,
+      "user.update",
+      { profile_version: profile.profile_version, moved_to: body.new },
+      { actor: session.actor },
     );
+    const { results } = await env.DB.prepare(
+      "SELECT peer_instance FROM user_link WHERE actor=?",
+    )
+      .bind(session.actor)
+      .all<{ peer_instance: string }>();
+    for (const link of results)
+      if (getInstanceConfig(env).federation_peers.includes(link.peer_instance))
+        await queueDelivery(env, link.peer_instance, event);
+    return protocolResponse(event);
   }
   if (path === "/api/me/migration/custody" && method === "POST") {
     const body = await boundedJson(request);

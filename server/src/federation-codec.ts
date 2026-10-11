@@ -222,8 +222,14 @@ export function uuidV7(now = Date.now()): string {
   );
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
+export function normalizeJsonStrings<T>(value: T): T {
+  if (value === undefined) return value;
+  return JSON.parse(JSON.stringify(value), (_key, entry) =>
+    typeof entry === "string" ? entry.normalize("NFC") : entry,
+  ) as T;
+}
 export function protocolResponse(value: unknown, status = 200): Response {
-  return Response.json(value, {
+  return Response.json(normalizeJsonStrings(value), {
     status,
     headers: {
       "Access-Control-Allow-Origin": "*",

@@ -31,6 +31,8 @@ interface MigrationRow {
   state: string;
   proof: string;
   announcement_id: string | null;
+  announcement: string | null;
+  error: string | null;
   effective_at: number;
 }
 export async function migrationCaller(
@@ -94,6 +96,7 @@ async function verifyRelease(env: Env, proof: JsonObject): Promise<boolean> {
     "openmew/event/v1",
     release,
     String(release.origin),
+    Number(release.ts),
   );
   return true;
 }
@@ -162,6 +165,15 @@ export async function acceptMigrationProof(
   if (challenge.old_actor !== proof.old || challenge.new_actor !== proof.new)
     throw new ProtocolError(403, "OMEW_OWNERSHIP_PROOF_INVALID");
   const key = await verifyClaim(env, proof);
+  if (domain(proof.new) === instanceDomain(env)) {
+    const pinned = await env.DB.prepare(
+      "SELECT key_id FROM ownership_pins WHERE actor=? ORDER BY created_at DESC LIMIT 1",
+    )
+      .bind(proof.new)
+      .first<{ key_id: string }>();
+    if (pinned && pinned.key_id !== key.key_id)
+      throw new ProtocolError(409, "OMEW_MIGRATION_TARGET_IN_USE");
+  }
   const released = await verifyRelease(env, proof);
   const existing = await env.DB.prepare(
     "SELECT * FROM account_migrations WHERE old_actor=?",
@@ -183,16 +195,13 @@ export async function acceptMigrationProof(
   const effectiveAt = released
     ? now
     : (announcement?.effective_at ?? now + NOTICE_MS);
-  const reservation = await env.DB.prepare(
-    "UPDATE migration_challenges SET used_at=? WHERE nonce=? AND used_at IS NULL AND expires_at>=? RETURNING nonce",
-  )
-    .bind(now, proof.nonce, now)
-    .first();
-  if (!reservation) throw new ProtocolError(409, "OMEW_CHALLENGE_STALE");
-  await env.DB.prepare(
-    "INSERT INTO account_migrations(old_actor,new_actor,mode,state,proof,announcement_id,accepted_at,effective_at) VALUES (?,?,?,'pending',?,?,?,?) ON CONFLICT(old_actor) DO UPDATE SET new_actor=excluded.new_actor,mode=excluded.mode,state='pending',proof=excluded.proof,announcement_id=excluded.announcement_id,accepted_at=excluded.accepted_at,effective_at=excluded.effective_at",
-  )
-    .bind(
+  const accepted = await env.DB.batch([
+    env.DB.prepare(
+      "UPDATE migration_challenges SET used_at=? WHERE nonce=? AND used_at IS NULL AND expires_at>=?",
+    ).bind(now, proof.nonce, now),
+    env.DB.prepare(
+      "INSERT INTO account_migrations(old_actor,new_actor,mode,state,proof,announcement_id,accepted_at,effective_at) SELECT ?,?,?,'pending',?,?,?,? WHERE changes()=1 ON CONFLICT(old_actor) DO UPDATE SET new_actor=excluded.new_actor,mode=excluded.mode,state='pending',proof=excluded.proof,announcement_id=excluded.announcement_id,announcement=NULL,error=NULL,accepted_at=excluded.accepted_at,effective_at=excluded.effective_at",
+    ).bind(
       proof.old,
       proof.new,
       released ? "dual_sign" : "disaster",
@@ -200,8 +209,10 @@ export async function acceptMigrationProof(
       announcement?.id ?? null,
       now,
       effectiveAt,
-    )
-    .run();
+    ),
+  ]);
+  if (accepted[0]!.meta.changes !== 1)
+    throw new ProtocolError(409, "OMEW_CHALLENGE_STALE");
   if (domain(proof.new) === instanceDomain(env)) {
     await env.DB.prepare(
       "UPDATE users SET ownership_pubkey=? WHERE localpart=?",
@@ -221,9 +232,15 @@ export async function acceptMigrationProof(
       .run();
   }
   if (released) await settleMigrations(env);
+  const result = await env.DB.prepare(
+    "SELECT state,error FROM account_migrations WHERE old_actor=?",
+  )
+    .bind(proof.old)
+    .first<{ state: string; error: string | null }>();
   return {
     mode: released ? "dual_sign" : "disaster",
-    state: released ? "completed" : "pending",
+    state: result!.state,
+    ...(result!.error ? { error: result!.error } : {}),
     effective_at: effectiveAt,
   };
 }
@@ -278,63 +295,78 @@ export async function settleMigrations(env: Env): Promise<void> {
     .bind(Date.now())
     .all<MigrationRow>();
   for (const row of results) {
-    const { results: memberships } = await env.DB.prepare(
-      "SELECT stronghold_id FROM stronghold_member_index WHERE actor=?",
-    )
-      .bind(row.old_actor)
-      .all<{ stronghold_id: string }>();
-    for (const membership of memberships)
-      await env.STRONGHOLD_DO.getByName(membership.stronghold_id).migrateMember(
-        row.old_actor,
-        row.new_actor,
-      );
-    await revokeGuest(env, row.old_actor);
-    const guest = await env.DB.prepare(
-      "SELECT * FROM guest_identity WHERE actor=?",
-    )
-      .bind(row.old_actor)
-      .first<Record<string, unknown>>();
-    const statements: D1PreparedStatement[] = [
-      env.DB.prepare(
-        "INSERT OR IGNORE INTO actor_aliases(old_actor,new_actor,moved_at) VALUES (?,?,?)",
-      ).bind(row.old_actor, row.new_actor, Date.now()),
-      env.DB.prepare(
-        "UPDATE guest_identity SET profile_status='deactivated',sessions_revoked_at=? WHERE actor=?",
-      ).bind(Date.now(), row.old_actor),
-      env.DB.prepare("DELETE FROM federation_sessions WHERE actor=?").bind(
-        row.old_actor,
-      ),
-    ];
-    if (guest && domain(row.new_actor) !== instanceDomain(env)) {
-      statements.push(
+    try {
+      const { results: memberships } = await env.DB.prepare(
+        "SELECT stronghold_id FROM stronghold_member_index WHERE actor=?",
+      )
+        .bind(row.old_actor)
+        .all<{ stronghold_id: string }>();
+      for (const membership of memberships)
+        await env.STRONGHOLD_DO.getByName(
+          membership.stronghold_id,
+        ).migrateMember(row.old_actor, row.new_actor);
+      await revokeGuest(env, row.old_actor);
+      const guest = await env.DB.prepare(
+        "SELECT * FROM guest_identity WHERE actor=?",
+      )
+        .bind(row.old_actor)
+        .first<Record<string, unknown>>();
+      const statements: D1PreparedStatement[] = [
         env.DB.prepare(
-          "INSERT INTO guest_identity(actor,registered_origin,profile_version,display_name,avatar,profile_status,ownership_key_json,key_history_json,first_seen_at,last_assertion_at) VALUES (?,?,?,?,?,'active',?,?,?,?) ON CONFLICT(actor) DO UPDATE SET registered_origin=excluded.registered_origin",
-        ).bind(
-          row.new_actor,
-          domain(row.new_actor),
-          -1,
-          guest.display_name,
-          guest.avatar,
-          guest.ownership_key_json,
-          guest.key_history_json,
-          guest.first_seen_at,
-          Date.now(),
+          "INSERT OR IGNORE INTO actor_aliases(old_actor,new_actor,moved_at) VALUES (?,?,?)",
+        ).bind(row.old_actor, row.new_actor, Date.now()),
+        env.DB.prepare(
+          "UPDATE guest_identity SET profile_status='deactivated',sessions_revoked_at=? WHERE actor=?",
+        ).bind(Date.now(), row.old_actor),
+        env.DB.prepare("DELETE FROM federation_sessions WHERE actor=?").bind(
+          row.old_actor,
         ),
-      );
-    }
-    if (domain(row.new_actor) === instanceDomain(env)) {
+      ];
+      if (guest && domain(row.new_actor) !== instanceDomain(env)) {
+        statements.push(
+          env.DB.prepare(
+            "INSERT INTO guest_identity(actor,registered_origin,profile_version,display_name,avatar,profile_status,ownership_key_json,key_history_json,first_seen_at,last_assertion_at) VALUES (?,?,?,?,?,'active',?,?,?,?) ON CONFLICT(actor) DO UPDATE SET registered_origin=excluded.registered_origin",
+          ).bind(
+            row.new_actor,
+            domain(row.new_actor),
+            -1,
+            guest.display_name,
+            guest.avatar,
+            guest.ownership_key_json,
+            guest.key_history_json,
+            guest.first_seen_at,
+            Date.now(),
+          ),
+        );
+      }
+      if (domain(row.new_actor) === instanceDomain(env)) {
+        statements.push(
+          env.DB.prepare(
+            "INSERT INTO federation_local_profile(actor,aliases) VALUES (?,?) ON CONFLICT(actor) DO UPDATE SET aliases=excluded.aliases",
+          ).bind(row.new_actor, JSON.stringify([row.old_actor])),
+        );
+      }
       statements.push(
         env.DB.prepare(
-          "INSERT INTO federation_local_profile(actor,aliases) VALUES (?,?) ON CONFLICT(actor) DO UPDATE SET aliases=excluded.aliases",
-        ).bind(row.new_actor, JSON.stringify([row.old_actor])),
+          "UPDATE account_migrations SET state='completed',error=NULL WHERE old_actor=? AND state='pending'",
+        ).bind(row.old_actor),
+      );
+      await env.DB.batch(statements);
+    } catch (error) {
+      await env.DB.prepare(
+        "UPDATE account_migrations SET error=? WHERE old_actor=? AND state='pending'",
+      )
+        .bind(String(error), row.old_actor)
+        .run();
+      console.error(
+        JSON.stringify({
+          level: "error",
+          event: "migration.conflict",
+          actor: row.old_actor,
+          error: String(error),
+        }),
       );
     }
-    statements.push(
-      env.DB.prepare(
-        "UPDATE account_migrations SET state='completed' WHERE old_actor=? AND state='pending'",
-      ).bind(row.old_actor),
-    );
-    await env.DB.batch(statements);
   }
   await env.DB.prepare("DELETE FROM migration_challenges WHERE expires_at<?")
     .bind(Date.now() - 86400000)
@@ -392,7 +424,7 @@ export async function prepareMigrationEdges(
           "OMEW_OWNERSHIP_PROOF_INVALID",
         );
       await env.DB.prepare(
-        "UPDATE migration_edges SET state='awaiting_proof',challenge=?,error=NULL,updated_at=? WHERE old_actor=? AND peer=?",
+        "UPDATE migration_edges SET state='awaiting_proof',challenge=?,proof=NULL,error=NULL,updated_at=? WHERE old_actor=? AND peer=?",
       )
         .bind(JSON.stringify(challenge), Date.now(), oldActor, peer)
         .run();
@@ -426,33 +458,90 @@ export async function deliverMigrationProof(
     .bind(proof.old, newActor, peer)
     .first();
   if (!state) throw new ProtocolError(404, "OMEW_NOT_FOUND");
-  const path = "/migration/proof";
-  const response = await peerFetch(env, peer, path, {
-    method: "POST",
-    headers: await signedRequestHeaders(env, "POST", path, newActor),
-    body: JSON.stringify(proof),
-  });
-  const result = await boundedJson(response);
   await env.DB.prepare(
-    "UPDATE migration_edges SET proof=?,state=?,error=?,updated_at=? WHERE old_actor=? AND peer=?",
+    "UPDATE migration_edges SET proof=?,state='delivering',error=NULL,updated_at=? WHERE old_actor=? AND peer=?",
   )
-    .bind(
-      JSON.stringify(proof),
-      response.ok ? "resolved" : "pending",
-      response.ok ? null : JSON.stringify(result),
-      Date.now(),
-      proof.old,
-      peer,
-    )
+    .bind(JSON.stringify(proof), Date.now(), proof.old, peer)
     .run();
-  if (!response.ok)
-    throw new ProtocolError(
-      response.status,
-      object(result) && object(result.error)
-        ? String(result.error.code)
-        : "OMEW_DELIVERY_FAILED",
+  return attemptMigrationDelivery(env, newActor, peer, proof);
+}
+
+async function attemptMigrationDelivery(
+  env: Env,
+  newActor: string,
+  peer: string,
+  proof: JsonObject,
+): Promise<JsonObject> {
+  try {
+    const path = "/migration/proof";
+    const response = await peerFetch(env, peer, path, {
+      method: "POST",
+      headers: await signedRequestHeaders(env, "POST", path, newActor),
+      body: JSON.stringify(proof),
+    });
+    let result = await boundedJson(response);
+    let accepted = response.ok;
+    if (!accepted && response.status === 409) {
+      const statusPath = `/migration/status?old=${encodeURIComponent(String(proof.old))}&nonce=${encodeURIComponent(String(proof.nonce))}`;
+      const status = await peerFetch(env, peer, statusPath, {
+        headers: await signedRequestHeaders(env, "GET", statusPath, newActor),
+      });
+      if (status.ok) {
+        result = await boundedJson(status);
+        accepted = true;
+      }
+    }
+    if (!accepted) {
+      const code =
+        object(result) && object(result.error)
+          ? String(result.error.code)
+          : "OMEW_DELIVERY_FAILED";
+      throw new ProtocolError(response.status, code);
+    }
+    await env.DB.prepare(
+      "UPDATE migration_edges SET state='resolved',error=NULL,updated_at=? WHERE old_actor=? AND peer=?",
+    )
+      .bind(Date.now(), proof.old, peer)
+      .run();
+    return { peer, state: "resolved", result };
+  } catch (error) {
+    const needsProof =
+      error instanceof ProtocolError &&
+      ["OMEW_CHALLENGE_STALE", "OMEW_OWNERSHIP_PROOF_INVALID"].includes(
+        error.code,
+      );
+    await env.DB.prepare(
+      "UPDATE migration_edges SET state=?,error=?,updated_at=? WHERE old_actor=? AND peer=?",
+    )
+      .bind(
+        needsProof ? "awaiting_proof" : "delivering",
+        String(error),
+        Date.now(),
+        proof.old,
+        peer,
+      )
+      .run();
+    return {
+      peer,
+      state: needsProof ? "awaiting_proof" : "delivering",
+      error: String(error),
+    };
+  }
+}
+
+export async function retryMigrationEdges(env: Env): Promise<void> {
+  const { results } = await env.DB.prepare(
+    "SELECT new_actor,peer,proof FROM migration_edges WHERE state='delivering' AND proof IS NOT NULL AND updated_at<? ORDER BY updated_at LIMIT 10",
+  )
+    .bind(Date.now() - 60000)
+    .all<{ new_actor: string; peer: string; proof: string }>();
+  for (const row of results)
+    await attemptMigrationDelivery(
+      env,
+      row.new_actor,
+      row.peer,
+      JSON.parse(row.proof),
     );
-  return { peer, state: "resolved", result };
 }
 export async function migrationRequest(
   request: Request,
@@ -487,19 +576,37 @@ export async function announceMigration(
     .bind(proof.old, actor)
     .first<MigrationRow>();
   if (!state) throw new ProtocolError(403, "OMEW_OWNERSHIP_PROOF_INVALID");
-  const event = await newEvent(
-    env,
-    "user.moved",
-    {
-      old: proof.old,
-      new: actor,
-      mode: state.mode,
-      proof,
-      effective_at: state.effective_at,
-      ...(proof.home_release ? { home_release: proof.home_release } : {}),
-    },
-    { actor },
-  );
+  const acceptedProof = JSON.parse(state.proof) as JsonObject;
+  const candidate = state.announcement
+    ? (JSON.parse(state.announcement) as Envelope)
+    : await newEvent(
+        env,
+        "user.moved",
+        {
+          old: proof.old,
+          new: actor,
+          mode: state.mode,
+          proof: acceptedProof,
+          effective_at: state.effective_at,
+          ...(acceptedProof.home_release
+            ? { home_release: acceptedProof.home_release }
+            : {}),
+        },
+        { actor },
+      );
+  if (!state.announcement)
+    await env.DB.prepare(
+      "UPDATE account_migrations SET announcement=? WHERE old_actor=? AND new_actor=? AND announcement IS NULL",
+    )
+      .bind(JSON.stringify(candidate), proof.old, actor)
+      .run();
+  const stored = await env.DB.prepare(
+    "SELECT announcement FROM account_migrations WHERE old_actor=? AND new_actor=?",
+  )
+    .bind(proof.old, actor)
+    .first<{ announcement: string }>();
+  const event = JSON.parse(stored!.announcement) as Envelope;
+  await acceptMigrationAnnouncement(env, event);
   for (const peer of peers) await queueDelivery(env, peer, event);
   return event;
 }

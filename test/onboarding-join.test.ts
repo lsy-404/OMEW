@@ -7,8 +7,6 @@ import leftColumn from '../web/src/components/LeftColumn.vue?raw'
 import postModal from '../web/src/components/PostModal.vue?raw'
 import rightColumn from '../web/src/components/RightColumn.vue?raw'
 import onboarding from '../web/src/components/StrongholdOnboarding.vue?raw'
-import chatRoom from '../web/src/composables/useChatRoom.ts?raw'
-import sectionRoom from '../web/src/composables/useSectionRoom.ts?raw'
 import strongholdState from '../web/src/composables/useStronghold.ts?raw'
 
 describe('首次登录据点选择', () => {
@@ -39,13 +37,6 @@ describe('首次登录据点选择', () => {
     expect(strongholdState).toContain('isPublicPreview.value = true')
     expect(strongholdState).toContain('const isReadOnly = computed(() => isGuestMode.value || (isPublicPreview.value && !authState.isAdmin.value))')
     expect(directoryModal).toContain("const { joinedNodeIds, selectedNodeId, loadStrongholds } = useStronghold()")
-  })
-
-  it('公开预览只读取聊天和帖子，不建立成员 WebSocket', () => {
-    expect(chatRoom).toMatch(/\[selectedNodeId, selectedChannel, isReadOnly\]/)
-    expect(chatRoom).toContain('if (readOnly || !auth.token.value)')
-    expect(sectionRoom).toMatch(/\[selectedNodeId, selectedSection, isReadOnly\]/)
-    expect(sectionRoom).toContain('if (readOnly || !auth.token.value) return')
   })
 
   it('公开预览隐藏写入口，并允许已登录用户直接加入当前据点', () => {

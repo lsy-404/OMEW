@@ -2,7 +2,7 @@
 
 ## Room history and search
 
-Room history remains ordered by `seq`. A RoomDO alarm archives eligible rows into immutable gzip NDJSON objects at 10,000 items per shard, writes the D1 archive index and search source rows, then removes only those item rows from the hot SQLite table. Re-running an interrupted archive uses the same object key and replaces the D1 range/search rows before deleting hot rows. `meta.next_seq`, dedupe records, edits, tombstones, reactions, and section post indexes stay in the room database.
+Room history remains ordered by `seq`. A RoomDO alarm archives eligible rows into immutable gzip NDJSON objects in bounded shards, writes the D1 archive index and search source rows, then removes only those item rows from the hot SQLite table. Re-running an interrupted archive uses the same object key and replaces the D1 range/search rows before deleting hot rows. `meta.next_seq`, dedupe records, edits, tombstones, reactions, and section post indexes stay in the room database.
 
 Section root posts stay in the room database so the post feed and its bump ordering remain directly readable. Replies can move to archive shards; post detail merges hot and archived replies. Reactions remain hot-only as specified by the protocol.
 
@@ -27,6 +27,15 @@ These snapshots cover the RoomDO database. Cold archive objects remain in R2 and
 ## Stronghold governance snapshots
 
 Stronghold governance state is a separate Durable Object database. Its snapshot includes the complete SQL columns and rows from `config`, `room`, `member`, `ban`, and `tip`, plus `member_migration` and `control_event` when those tables exist. It preserves the original stronghold ID, owner membership, room registration, restrictions, bans, and tips. Restore validates the complete gzip stream, digest, table allowlist, schema columns, owner row, and stronghold identity before writing; it only accepts a target whose governance tables are empty.
+
+```text
+POST /api/stronghold/{id}/backups
+GET  /api/stronghold/{id}/backups
+GET  /api/stronghold/{id}/backups/{backupId}
+POST /api/stronghold/{id}/restore  {"backup_id":"..."}
+```
+
+Export requires the current stronghold owner or the instance owner. Recovery into an empty StrongholdDO requires the owner recorded in the backup or the instance owner, so a lost governance database can be restored before its owner membership exists again.
 
 For a full recovery, restore the D1 database and R2 bucket, then restore the StrongholdDO governance snapshot before restoring each RoomDO snapshot. Use the original stronghold ID and instance domain. Configure the recovered instance in multi mode before starting Workers so single-mode auto-bootstrap cannot create replacement state. Preserve `DEV_TOKEN_SECRET` and the other service secrets used by the deployment. Stronghold governance snapshots do not contain room messages or archive shard bodies; RoomDO snapshots and the original R2 archive objects are still required.
 

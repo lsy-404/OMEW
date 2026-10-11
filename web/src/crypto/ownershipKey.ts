@@ -83,6 +83,11 @@ export function parseOwnershipEnvelope(field: string): OwnershipEnvelope {
   if (parsed?.v !== 1 || parsed?.kdf !== 'argon2id' || typeof parsed?.salt !== 'string' || typeof parsed?.nonce !== 'string' || typeof parsed?.ciphertext !== 'string') {
     throw new Error('malformed ownership envelope')
   }
+  if (parsed.cipher !== 'AES-256-GCM' ||
+      Object.entries(KDF_PARAMS).some(([key, value]) => parsed.kdfParams?.[key] !== value) ||
+      fromBase64(parsed.salt).length !== 16 || fromBase64(parsed.nonce).length !== 12 || fromBase64(parsed.ciphertext).length !== 48) {
+    throw new Error('unsupported ownership envelope')
+  }
   return parsed as OwnershipEnvelope
 }
 

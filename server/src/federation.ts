@@ -1,3 +1,4 @@
+import { reportThreshold } from "./account-recovery";
 import { base64UrlEncode, signToken } from "./auth";
 import { getInstanceConfig } from "./config";
 import { instanceDomain, type SessionTokenClaims } from "./types";
@@ -29,7 +30,11 @@ import {
   signDocument,
   verifyPeerDocument,
 } from "./federation-keys";
-import { localProfile, upsertGuestProfile } from "./federation-profiles";
+import {
+  localProfile,
+  upsertGuestProfile,
+  receiveSideloads,
+} from "./federation-profiles";
 
 const EVENT_TYPES = new Set([
   "item.create",
@@ -41,8 +46,10 @@ const EVENT_TYPES = new Set([
   "member.update",
   "member.ban",
   "member.join_request",
-  "member.join_approved",
-  "member.join_rejected",
+  "member.add",
+  "member.reject",
+  "member.remove",
+  "member.unban",
   "stronghold.update",
   "stronghold.room.create",
   "stronghold.room.update",
@@ -78,23 +85,80 @@ export async function newEvent(
   payload: JsonObject,
   context: {
     actor?: string;
+    audience?: "public" | "members";
     room?: string;
     seq?: number;
     id?: string;
     ts?: number;
   } = {},
 ): Promise<Envelope> {
-  return (await signDocument(env, "openmew/event/v1", {
+  let objects: JsonObject | undefined;
+  if (
+    context.actor &&
+    (type.startsWith("item.") || type.startsWith("member."))
+  ) {
+    try {
+      let profile: JsonObject | null;
+      if (domain(context.actor) === instanceDomain(env))
+        profile = await localProfile(env, context.actor);
+      else {
+        const row = await env.DB.prepare(
+          "SELECT profile_version,display_name,avatar,ownership_key_json,key_history_json FROM guest_identity WHERE actor=?",
+        )
+          .bind(context.actor)
+          .first<{
+            profile_version: number;
+            display_name: string | null;
+            avatar: string | null;
+            ownership_key_json: string | null;
+            key_history_json: string | null;
+          }>();
+        profile = row
+          ? {
+              actor: context.actor,
+              profile_version: row.profile_version,
+              display_name: row.display_name ?? context.actor,
+              ...(row.avatar ? { avatar: row.avatar } : {}),
+              ...(row.ownership_key_json
+                ? { ownership_key: JSON.parse(row.ownership_key_json) }
+                : {}),
+              ...(row.key_history_json
+                ? { key_history: JSON.parse(row.key_history_json) }
+                : {}),
+            }
+          : null;
+      }
+      if (profile) {
+        const { sig: _sig, key_id: _key, ...summary } = profile;
+        objects = { users: [summary] };
+      }
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          level: "warn",
+          event: "profile.sideload_failed",
+          actor: context.actor,
+          error: String(error),
+        }),
+      );
+    }
+  }
+  const fields: JsonObject = {
     v: 1,
     id: context.id ?? uuidV7(),
     type,
     origin: instanceDomain(env),
     ts: context.ts ?? Date.now(),
     payload,
+    ...(objects ? { objects } : {}),
+    ...(context.audience ? { audience: context.audience } : {}),
     ...(context.actor ? { actor: context.actor } : {}),
     ...(context.room ? { room: context.room } : {}),
     ...(context.seq !== undefined ? { seq: context.seq } : {}),
-  })) as Envelope;
+  };
+  if (new TextEncoder().encode(JSON.stringify(fields)).length > 64000)
+    delete fields.objects;
+  return (await signDocument(env, "openmew/event/v1", fields)) as Envelope;
 }
 export async function queueDelivery(
   env: Env,
@@ -113,7 +177,8 @@ export async function queueDelivery(
       Date.now() + QUEUE_MS,
     )
     .run();
-  await env.FEDERATION_OUT.send({ peer, envelope } satisfies Delivery);
+  if (env.FEDERATION_OUT)
+    await env.FEDERATION_OUT.send({ peer, envelope } satisfies Delivery);
 }
 export async function signedRequestHeaders(
   env: Env,
@@ -122,15 +187,20 @@ export async function signedRequestHeaders(
   actor: string,
 ): Promise<Headers> {
   const target = new URL(path, "https://request.invalid");
-  const doc = await signDocument(env, "openmew/request/v1", {
-    method,
-    path: target.pathname,
-    query: target.search.slice(1),
-    origin: instanceDomain(env),
-    on_behalf_of: actor,
-    ts: Date.now(),
-    nonce: base64UrlEncode(crypto.getRandomValues(new Uint8Array(16))),
-  });
+  const doc = await signDocument(
+    env,
+    "openmew/request/v1",
+    {
+      method,
+      path: target.pathname,
+      query: target.search.slice(1),
+      origin: instanceDomain(env),
+      on_behalf_of: actor,
+      ts: Date.now(),
+      nonce: base64UrlEncode(crypto.getRandomValues(new Uint8Array(16))),
+    },
+    false,
+  );
   return new Headers({
     Authorization: `OpenMew key_id=${doc.key_id},ts=${doc.ts},nonce=${doc.nonce},on_behalf_of=${encodeURIComponent(actor)},sig=${doc.sig}`,
     "OMEW-Origin": instanceDomain(env),
@@ -141,8 +211,7 @@ export async function verifyRequest(
   env: Env,
   request: Request,
 ): Promise<{ origin: string; actor: string }> {
-  const origin = request.headers.get("OMEW-Origin") ?? "";
-  await assertPeer(env, origin);
+  let origin = request.headers.get("OMEW-Origin") ?? "";
   const auth = request.headers.get("Authorization");
   if (!auth?.startsWith("OpenMew "))
     throw new ProtocolError(403, "OMEW_BAD_SIGNATURE");
@@ -161,6 +230,8 @@ export async function verifyRequest(
   } catch {
     throw new ProtocolError(400, "OMEW_MALFORMED");
   }
+  if (!origin) origin = domain(actor);
+  await assertPeer(env, origin);
   const time = Number(fields.ts);
   const nonce = fields.nonce ?? "";
   if (!canonicalActor(actor) || domain(actor) !== origin)
@@ -185,6 +256,8 @@ export async function verifyRequest(
       sig: fields.sig,
     },
     origin,
+    Date.now(),
+    false,
   );
   const inserted = await env.DB.prepare(
     "INSERT OR IGNORE INTO federation_seen(origin,id,expires_at) VALUES (?,?,?) RETURNING id",
@@ -230,6 +303,8 @@ export async function verifyEnvelope(
       throw new ProtocolError(403, "OMEW_BAD_SIGNATURE");
   } else await verifyPeerDocument(env, "openmew/event/v1", value, value.origin);
   const event = value as Envelope;
+  if (event.audience === "members")
+    throw new ProtocolError(403, "OMEW_FORBIDDEN");
   if (event.actor && !canonicalActor(event.actor))
     throw new ProtocolError(400, "OMEW_NOT_CANONICAL");
   if (event.room && !canonicalRoom(event.room))
@@ -302,7 +377,7 @@ export async function applyRoomEvents(
           room,
           event.seq,
           p.parent_seq ?? null,
-          p.parent_seq ?? event.seq,
+          p.root_seq ?? p.parent_seq ?? event.seq,
           event.actor ?? "",
           p.kind,
           p.created_at ?? event.ts,
@@ -344,6 +419,7 @@ export async function acceptEnvelope(
       !["post", "reply"].includes(String(event.payload.kind)))
   )
     return "ignored";
+  if (object(event.objects)) await receiveSideloads(env, event.objects.users);
   if (event.type === "item.bump") {
     if (
       event.seq !== undefined ||
@@ -373,8 +449,13 @@ export async function acceptEnvelope(
     )
       .bind(event.origin, event.id)
       .first()
-  )
+  ) {
+    if (event.type.startsWith("item.") && event.room)
+      await applyRoomEvents(env, event.origin, event.room);
+    if (event.type === "user.deactivate" && event.actor)
+      await revokeGuest(env, event.actor);
     return "duplicate";
+  }
   const statements: D1PreparedStatement[] = [];
   if (event.type.startsWith("item.")) {
     if (
@@ -390,7 +471,17 @@ export async function acceptEnvelope(
       .first<{ high_water: number }>();
     if (event.seq > mapping!.high_water + 200)
       throw new ProtocolError(409, "OMEW_SEQ_GAP");
-    const r2Key = `federation/${event.origin}/${event.room}/${event.seq}.json`;
+    const existing = await env.DB.prepare(
+      "SELECT r2_key FROM federation_events WHERE origin=? AND room=? AND seq=?",
+    )
+      .bind(event.origin, event.room, event.seq)
+      .first<{ r2_key: string }>();
+    if (existing) {
+      const saved = await env.MEDIA.get(existing.r2_key);
+      if (!saved || (await saved.json<Envelope>()).id !== event.id)
+        throw new ProtocolError(409, "OMEW_SEQ_CONFLICT");
+    }
+    const r2Key = `federation/${event.origin}/${event.room}/${event.seq}-${event.id}.json`;
     await env.MEDIA.put(r2Key, JSON.stringify(event), {
       httpMetadata: { contentType: "application/json" },
     });
@@ -399,6 +490,24 @@ export async function acceptEnvelope(
         "INSERT OR IGNORE INTO federation_events(origin,room,seq,r2_key,received_at) VALUES (?,?,?,?,?)",
       ).bind(event.origin, event.room, event.seq, r2Key, Date.now()),
     );
+  } else if (event.type === "member.join_request") {
+    if (
+      event.payload.subject !== event.actor ||
+      typeof event.payload.stronghold !== "string"
+    )
+      throw new ProtocolError(403, "OMEW_ACTOR_MISMATCH");
+    const guest = await env.DB.prepare(
+      "SELECT profile_status FROM guest_identity WHERE actor=?",
+    )
+      .bind(event.actor)
+      .first<{ profile_status: string }>();
+    if (guest?.profile_status !== "active")
+      throw new ProtocolError(403, "OMEW_SESSION_INVALID");
+    const stronghold = env.STRONGHOLD_DO.getByName(event.payload.stronghold);
+    if (!(await stronghold.getConfig()))
+      throw new ProtocolError(404, "OMEW_NOT_FOUND");
+    if (!(await stronghold.requestMembership(event.actor!)))
+      throw new ProtocolError(403, "OMEW_BANNED");
   } else if (event.type === "user.link_confirm") {
     statements.push(
       env.DB.prepare(
@@ -701,12 +810,12 @@ export async function backfillRoom(
   actor: string,
 ): Promise<void> {
   const mapping = await env.DB.prepare(
-    "SELECT high_water FROM federation_rooms WHERE origin=? AND room=? AND visibility='public'",
+    "SELECT high_water,snapshot_before FROM federation_rooms WHERE origin=? AND room=? AND visibility='public'",
   )
     .bind(peer, room)
-    .first<{ high_water: number }>();
+    .first<{ high_water: number; snapshot_before: number | null }>();
   if (!mapping) throw new ProtocolError(404, "OMEW_ROOM_NOT_FOUND");
-  const path = `/rooms/${room}/history?after=${mapping.high_water}&limit=200`;
+  const path = `/rooms/${room}/history?after=${mapping.high_water}&limit=16${mapping.snapshot_before !== null ? `&snapshot_before=${mapping.snapshot_before}` : ""}`;
   const response = await peerFetch(env, peer, path, {
     headers: await signedRequestHeaders(env, "GET", path, actor),
   });
@@ -756,12 +865,22 @@ export async function backfillRoom(
         ),
       );
     }
+    const next = result.snapshot_next_before ?? null;
+    if (
+      next !== null &&
+      (!Number.isSafeInteger(next) ||
+        Number(next) < 1 ||
+        (mapping.snapshot_before !== null &&
+          Number(next) >= mapping.snapshot_before))
+    )
+      throw new ProtocolError(400, "OMEW_MALFORMED");
     snapshotStatements.push(
       env.DB.prepare(
-        "UPDATE federation_rooms SET high_water=? WHERE origin=? AND room=? AND high_water=0",
-      ).bind(result.baseline, peer, room),
+        "UPDATE federation_rooms SET high_water=?,snapshot_before=? WHERE origin=? AND room=? AND high_water=0",
+      ).bind(next === null ? result.baseline : 0, next, peer, room),
     );
     await env.DB.batch(snapshotStatements);
+    if (next !== null) return;
   }
   for (const value of result.events) {
     const event = await verifyEnvelope(env, value, true);
@@ -832,16 +951,39 @@ export async function runFederationMaintenance(env: Env): Promise<void> {
       Math.floor(now / 60000) - 2,
     ),
   ]);
+  const { results: staleKeys } = await env.DB.prepare(
+    "SELECT instance FROM instances WHERE fetched_at<? ORDER BY fetched_at LIMIT 10",
+  )
+    .bind(now - 300000)
+    .all<{ instance: string }>();
+  for (const row of staleKeys)
+    if (configuredPeer(env, row.instance)) {
+      try {
+        await discoverPeer(env, row.instance);
+      } catch (error) {
+        console.error(
+          JSON.stringify({
+            level: "warn",
+            event: "federation.keys_refresh_failed",
+            origin: row.instance,
+            error: String(error),
+          }),
+        );
+      }
+    }
   const { results: delivery } = await env.DB.prepare(
-    "SELECT peer,envelope FROM federation_delivery WHERE state='pending' AND next_attempt<=? ORDER BY next_attempt LIMIT 50",
+    "SELECT peer,envelope,attempts FROM federation_delivery WHERE state='pending' AND next_attempt<=? ORDER BY next_attempt LIMIT 50",
   )
     .bind(now)
-    .all<{ peer: string; envelope: string }>();
-  for (const row of delivery)
-    await env.FEDERATION_OUT.send({
+    .all<{ peer: string; envelope: string; attempts: number }>();
+  for (const row of delivery) {
+    const delivery = {
       peer: row.peer,
       envelope: JSON.parse(row.envelope),
-    } satisfies Delivery);
+    } satisfies Delivery;
+    if (env.FEDERATION_OUT) await env.FEDERATION_OUT.send(delivery);
+    else await deliverEnvelope(env, delivery, row.attempts + 1);
+  }
   const { results: rooms } = await env.DB.prepare(
     "SELECT origin,room,subscriber,subscribed_until FROM federation_rooms WHERE visibility='public' ORDER BY last_backfill LIMIT 10",
   ).all<{
@@ -910,103 +1052,164 @@ export async function runFederationMaintenance(env: Env): Promise<void> {
       .bind(Date.now(), row.origin, row.room)
       .run();
   }
-  const { settleMigrations } = await import("./account-migration");
+  const { results: profiles } = await env.DB.prepare(
+    "SELECT actor,updated_at FROM federation_profile_pending ORDER BY updated_at LIMIT 20",
+  ).all<{ actor: string; updated_at: number }>();
+  for (const pending of profiles) {
+    try {
+      const profile = await localProfile(env, pending.actor);
+      const { sig: _sig, key_id: _key, v: _v, ...payload } = profile;
+      const event = await newEvent(
+        env,
+        profile.status === "active" ? "user.update" : "user.deactivate",
+        payload,
+        { actor: pending.actor },
+      );
+      const { results: links } = await env.DB.prepare(
+        "SELECT peer_instance FROM user_link WHERE actor=?",
+      )
+        .bind(pending.actor)
+        .all<{ peer_instance: string }>();
+      for (const link of links)
+        if (configuredPeer(env, link.peer_instance))
+          await queueDelivery(env, link.peer_instance, event);
+      await env.DB.prepare(
+        "DELETE FROM federation_profile_pending WHERE actor=? AND updated_at=?",
+      )
+        .bind(pending.actor, pending.updated_at)
+        .run();
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          level: "warn",
+          event: "profile.delivery_failed",
+          actor: pending.actor,
+          error: String(error),
+        }),
+      );
+    }
+  }
+  const { settleMigrations, retryMigrationEdges } =
+    await import("./account-migration");
   await settleMigrations(env);
+  await retryMigrationEdges(env);
 }
 export async function consumeFederationQueue(
   batch: MessageBatch<Delivery>,
   env: Env,
 ): Promise<void> {
   for (const message of batch.messages) {
-    const { peer, envelope } = message.body;
-    try {
-      await assertPeer(env, peer);
-      const pending = await env.DB.prepare(
-        "SELECT expires_at,state FROM federation_delivery WHERE id=? AND peer=?",
-      )
-        .bind(envelope.id, peer)
-        .first<{ expires_at: number; state: string }>();
-      if (!pending || pending.state !== "pending") {
-        message.ack();
-        continue;
-      }
-      if (pending.expires_at < Date.now()) {
-        await env.FEDERATION_DEAD.send(message.body);
-        message.ack();
-        continue;
-      }
-      if (envelope.room) {
-        const [strongholdId, , resId] = envelope.room.split("/");
-        const stronghold = env.STRONGHOLD_DO.getByName(strongholdId!);
-        const [config, room] = await Promise.all([
-          stronghold.getConfig(),
-          stronghold.getRoom(resId!),
-        ]);
-        if (
-          !config ||
-          config.visibility !== "public" ||
-          !room ||
-          room.restricted ||
-          room.archived
-        ) {
-          await env.DB.prepare(
-            "DELETE FROM federation_delivery WHERE id=? AND peer=?",
-          )
-            .bind(envelope.id, peer)
-            .run();
-          message.ack();
-          continue;
-        }
-      }
-      const renewed =
-        Math.abs(Date.now() - envelope.ts) > FRESH_MS
-          ? await signDocument(env, "openmew/event/v1", {
-              ...envelope,
-              ts: Date.now(),
-            })
-          : envelope;
-      const response = await peerFetch(env, peer, "/federation/inbox", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(renewed),
-      });
-      if (!response.ok)
-        throw new ProtocolError(response.status, "OMEW_DELIVERY_FAILED");
-      if (response.headers.has("OMEW-Revocation-Hint"))
-        await discoverPeer(env, peer);
-      await env.DB.prepare(
-        "DELETE FROM federation_delivery WHERE id=? AND peer=?",
-      )
-        .bind(envelope.id, peer)
-        .run();
-      message.ack();
-    } catch (error) {
-      const next =
-        Date.now() +
-        Math.min(3600000, 1000 * 2 ** Math.min(message.attempts, 12));
-      await env.DB.prepare(
-        "UPDATE federation_delivery SET attempts=attempts+1,next_attempt=? WHERE id=? AND peer=?",
-      )
-        .bind(next, envelope.id, peer)
-        .run();
-      console.error(
-        JSON.stringify({
-          level: "warn",
-          event: "federation.delivery_failed",
-          origin: peer,
-          id: envelope.id,
-          attempt: message.attempts,
-          error: String(error),
-        }),
-      );
-      message.retry({ delaySeconds: Math.ceil((next - Date.now()) / 1000) });
+    const retry = await deliverEnvelope(env, message.body, message.attempts);
+    if (retry === null) message.ack();
+    else message.retry({ delaySeconds: retry });
+  }
+}
+async function deliverEnvelope(
+  env: Env,
+  delivery: Delivery,
+  attempts: number,
+): Promise<number | null> {
+  const { peer, envelope } = delivery;
+  try {
+    await assertPeer(env, peer);
+    const pending = await env.DB.prepare(
+      "SELECT expires_at,state FROM federation_delivery WHERE id=? AND peer=?",
+    )
+      .bind(envelope.id, peer)
+      .first<{ expires_at: number; state: string }>();
+    if (!pending || pending.state !== "pending") {
+      return null;
     }
+    if (pending.expires_at < Date.now()) {
+      if (env.FEDERATION_DEAD) await env.FEDERATION_DEAD.send(delivery);
+      else {
+        await env.DB.prepare(
+          "UPDATE federation_delivery SET state='dead' WHERE id=? AND peer=?",
+        )
+          .bind(envelope.id, peer)
+          .run();
+        reportThreshold({
+          source: "queue.federation.dead",
+          value: 1,
+          threshold: 1,
+        });
+      }
+      return null;
+    }
+    if (envelope.room) {
+      const [strongholdId, , resId] = envelope.room.split("/");
+      const stronghold = env.STRONGHOLD_DO.getByName(strongholdId!);
+      const [config, room] = await Promise.all([
+        stronghold.getConfig(),
+        stronghold.getRoom(resId!),
+      ]);
+      if (
+        !config ||
+        config.visibility !== "public" ||
+        !room ||
+        room.restricted ||
+        room.archived
+      ) {
+        await env.DB.prepare(
+          "DELETE FROM federation_delivery WHERE id=? AND peer=?",
+        )
+          .bind(envelope.id, peer)
+          .run();
+        return null;
+      }
+    }
+    const renewed =
+      Math.abs(Date.now() - envelope.ts) > FRESH_MS
+        ? await signDocument(env, "openmew/event/v1", {
+            ...envelope,
+            ts: Date.now(),
+          })
+        : envelope;
+    const response = await peerFetch(env, peer, "/federation/inbox", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(renewed),
+    });
+    if (!response.ok)
+      throw new ProtocolError(response.status, "OMEW_DELIVERY_FAILED");
+    if (response.headers.has("OMEW-Revocation-Hint"))
+      await discoverPeer(env, peer);
+    await env.DB.prepare(
+      "DELETE FROM federation_delivery WHERE id=? AND peer=?",
+    )
+      .bind(envelope.id, peer)
+      .run();
+    return null;
+  } catch (error) {
+    const next =
+      Date.now() + Math.min(3600000, 1000 * 2 ** Math.min(attempts, 12));
+    await env.DB.prepare(
+      "UPDATE federation_delivery SET attempts=attempts+1,next_attempt=? WHERE id=? AND peer=?",
+    )
+      .bind(next, envelope.id, peer)
+      .run();
+    console.error(
+      JSON.stringify({
+        level: "warn",
+        event: "federation.delivery_failed",
+        origin: peer,
+        id: envelope.id,
+        attempt: attempts,
+        error: String(error),
+      }),
+    );
+    return Math.ceil((next - Date.now()) / 1000);
   }
 }
 export async function consumeDeadLetters(
   batch: MessageBatch<Delivery>,
   env: Env,
 ): Promise<void> {
+  reportThreshold({
+    source: "queue.federation.dead",
+    value: batch.messages.length,
+    threshold: 1,
+  });
   for (const message of batch.messages) {
     await env.DB.prepare(
       "UPDATE federation_delivery SET state='dead' WHERE id=? AND peer=?",

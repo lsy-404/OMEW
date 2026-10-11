@@ -65,6 +65,7 @@ function deploymentContext(options: {
       switchTraffic: vi.fn(),
     },
     domains: { attach: vi.fn() },
+    cron: { set: vi.fn() },
     secrets: { put: putSecret, putHostValue },
     crypto: { randomBase64: vi.fn(async () => "random-secret") },
     result: vi.fn(),
@@ -81,6 +82,7 @@ describe("Overture deployment recipe", () => {
     expect(state.putSecret).toHaveBeenCalledWith("DEV_TOKEN_SECRET", "random-secret");
     expect(state.putHostValue).toHaveBeenNthCalledWith(1, "CF_ACCOUNT_ID");
     expect(state.putHostValue).toHaveBeenNthCalledWith(2, "CF_API_TOKEN");
+    expect(state.ctx.cron.set).toHaveBeenCalledWith(["*/5 * * * *"]);
   });
 
   it("imports Wrangler history and applies only newer migrations on overwrite", async () => {

@@ -15,6 +15,9 @@ export default defineConfig({
     proxy: {
       '/api': { target: BACKEND, changeOrigin: true },
       '/federation': { target: BACKEND, changeOrigin: true },
+      '/.well-known/openmew': { target: BACKEND, changeOrigin: true },
+      '/migration': { target: BACKEND, changeOrigin: true },
+      '/rooms': { target: BACKEND, changeOrigin: true },
       '/inbox': { target: BACKEND, changeOrigin: true },
       '/media': { target: BACKEND, changeOrigin: true },
       '/stronghold': { target: BACKEND, changeOrigin: true, ws: true },

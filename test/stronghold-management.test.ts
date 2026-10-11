@@ -10,6 +10,7 @@ import {
   itemDeleteFrame,
   itemUpdateFrame,
   nextMessage,
+  nextMessageOfType,
   sessionToken,
 } from "./helpers";
 
@@ -591,7 +592,7 @@ describe("RoomDO edit/retract: moderator override", () => {
     await backdateItem(roomRef, createAck.seq as number, Date.now() - 60_000);
 
     mod.send(itemDeleteFrame(createAck.seq as number, "moderation"));
-    const ack = await nextMessage(mod);
+    const ack = await nextMessageOfType(mod,"ack");
     expect(ack).toMatchObject({ type: "ack", status: "ok", target_seq: createAck.seq });
 
     const batch = await nextMessage(member);
@@ -743,14 +744,10 @@ describe("HTTP edit/retract endpoints", () => {
   });
 });
 
-it("legacy :local member rows are lazily adopted under the configured domain", async () => {
+it("an external same-name actor cannot adopt a local member row", async () => {
   const id = `legacy${Date.now()}`;
   const stub = env.STRONGHOLD_DO.getByName(id);
   await stub.initConfig(id, "Legacy", "public", "@relic:local");
-  const adopted = await stub.getMember("@relic:omew.test");
-  expect(adopted).not.toBeNull();
-  expect(adopted!.role).toBe("owner");
-  const direct = await stub.getMember("@relic:omew.test");
-  expect(direct!.actor).toBe("@relic:omew.test");
-  expect(direct).toMatchObject({ role: "owner", deny: 0 });
+  expect(await stub.getMember("@relic:omew.test")).toBeNull();
+  expect(await stub.getMember("@relic:local")).toMatchObject({actor:"@relic:local",role:"owner",deny:0});
 });

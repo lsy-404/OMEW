@@ -5,6 +5,7 @@ import {
   boundedJson,
   canonicalDomain,
   keyId,
+  normalizeJsonStrings,
   object,
   ProtocolError,
   QUEUE_MS,
@@ -118,7 +119,7 @@ async function createOwn(env: Env, previous?: OwnRow): Promise<OwnRow> {
   if (!(rawPublic instanceof ArrayBuffer))
     throw new ProtocolError(500, "OMEW_INTERNAL");
   const publicKey = base64UrlEncode(new Uint8Array(rawPublic));
-  const createdAt = Date.now();
+  const createdAt = Math.max(Date.now(), (previous?.created_at ?? 0) + 1);
   const id = await keyId(publicKey);
   const rawPrivate = await crypto.subtle.exportKey("pkcs8", pair.privateKey);
   if (!(rawPrivate instanceof ArrayBuffer))
@@ -183,12 +184,18 @@ export async function signDocument(
   env: Env,
   prefix: string,
   fields: JsonObject,
+  coverKeyId = true,
 ): Promise<JsonObject> {
   const row = await ownKey(env);
-  const doc = { ...fields, key_id: row.key_id };
+  const normalized = normalizeJsonStrings(fields);
+  const doc = { ...normalized, key_id: row.key_id };
   return {
     ...doc,
-    sig: await signObject(prefix, doc, await openPrivate(env, row)),
+    sig: await signObject(
+      prefix,
+      coverKeyId ? doc : normalized,
+      await openPrivate(env, row),
+    ),
   };
 }
 export async function ownKeys(env: Env): Promise<JsonObject> {
@@ -265,12 +272,22 @@ export async function pinPeerKeys(
       throw new ProtocolError(400, "OMEW_MALFORMED");
     const entry = value as KeyEntry;
     const existing = trusted.get(entry.key_id);
-    if (existing && existing.public_key !== entry.public_key)
+    if (
+      existing &&
+      (existing.public_key !== entry.public_key ||
+        existing.created_at !== entry.created_at ||
+        (existing.prev_key_id ?? null) !== (entry.prev_key_id ?? null) ||
+        (existing.retired_at != null &&
+          existing.retired_at !== entry.retired_at) ||
+        (existing.revoked_at != null &&
+          existing.revoked_at !== entry.revoked_at))
+    )
       throw new ProtocolError(403, "OMEW_KEY_PIN_MISMATCH");
-    if (!existing && pinned.length > 0) {
+    if (!existing && trusted.size > 0) {
       const prev = trusted.get(String(entry.prev_key_id));
       if (
         !prev ||
+        entry.created_at <= prev.created_at ||
         !(await verifyObject(
           "openmew/key-rotation/v1",
           {
@@ -286,6 +303,15 @@ export async function pinPeerKeys(
       )
         throw new ProtocolError(403, "OMEW_KEY_CONTINUITY_BROKEN");
     }
+    if (
+      (entry.status === "retired" &&
+        (!Number.isSafeInteger(entry.retired_at) ||
+          Number(entry.retired_at) < entry.created_at)) ||
+      (entry.status === "revoked" &&
+        (!Number.isSafeInteger(entry.revoked_at) ||
+          Number(entry.revoked_at) < entry.created_at))
+    )
+      throw new ProtocolError(400, "OMEW_MALFORMED");
     if (existing?.status === "retired" && entry.status === "active")
       throw new ProtocolError(403, "OMEW_KEY_PIN_MISMATCH");
     if (existing?.status === "revoked" && entry.status !== "revoked")
@@ -361,13 +387,29 @@ export async function verifyPeerDocument(
   fields: JsonObject,
   peer: string,
   now = Date.now(),
+  coverKeyId = true,
 ): Promise<void> {
   await assertPeer(env, peer);
-  const row = await env.DB.prepare(
+  let row = await env.DB.prepare(
     "SELECT * FROM instance_keys WHERE instance=? AND key_id=?",
   )
     .bind(peer, String(fields.key_id))
     .first<KeyEntry>();
+  if (!row) {
+    const lease = await env.DB.prepare(
+      "UPDATE instances SET fetched_at=? WHERE instance=? AND fetched_at<? AND EXISTS(SELECT 1 FROM instance_keys WHERE instance=?) RETURNING instance",
+    )
+      .bind(Date.now(), peer, Date.now() - 60000, peer)
+      .first();
+    if (lease) {
+      await discoverPeer(env, peer);
+      row = await env.DB.prepare(
+        "SELECT * FROM instance_keys WHERE instance=? AND key_id=?",
+      )
+        .bind(peer, String(fields.key_id))
+        .first<KeyEntry>();
+    }
+  }
   if (
     !row ||
     (row.status === "retired" && now > Number(row.retired_at) + QUEUE_MS)
@@ -375,6 +417,9 @@ export async function verifyPeerDocument(
     throw new ProtocolError(403, "OMEW_KEY_UNKNOWN");
   if (row.status === "revoked")
     throw new ProtocolError(403, "OMEW_KEY_REVOKED");
-  if (!(await verifyObject(prefix, fields, row.public_key)))
+  const { key_id: _key, ...tuple } = fields;
+  if (
+    !(await verifyObject(prefix, coverKeyId ? fields : tuple, row.public_key))
+  )
     throw new ProtocolError(403, "OMEW_BAD_SIGNATURE");
 }

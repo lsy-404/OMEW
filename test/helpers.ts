@@ -27,6 +27,10 @@ import migration0021Messaging from "../server/migrations/0021_direct_messages_bl
 import migration0022Oidc from "../server/migrations/0022_oidc_sso.sql?raw";
 import migration0023OidcSessions from "../server/migrations/0023_oidc_sessions.sql?raw";
 import migration0025Federation from "../server/migrations/0025_federation.sql?raw";
+import migration0026Archive from "../server/migrations/0026_archive_search.sql?raw";
+import migration0028Voice from "../server/migrations/0028_voice_revocation.sql?raw";
+import migration0027Recovery from "../server/migrations/0027_account_recovery.sql?raw";
+import migration0029Backup from "../server/migrations/0029_stronghold_backups.sql?raw";
 import migration0024OidcUsername from "../server/migrations/0024_oidc_username.sql?raw";
 
 // Must match vitest.config.ts's miniflare.bindings.DEV_TOKEN_SECRET.
@@ -73,7 +77,7 @@ export async function ensureMigrated(): Promise<void> {
   ).first();
   const oidcIdentityColumns = oidcIdentities ? await env.DB.prepare("PRAGMA table_info(oidc_identities)").all<{ name: string }>() : null;
   const hasOidcUsername = oidcIdentityColumns?.results.some((column) => column.name === "username") ?? false;
-  if (marker && directoryProjection && hasCover && hasLastActive && hasBio && directMessages && oidcIdentities && oidcSessions && hasOidcUsername) return;
+  if (marker && directoryProjection && hasCover && hasLastActive && hasBio && directMessages && oidcIdentities && oidcSessions && hasOidcUsername) { await ensureRoadmapSchema(); return; }
   if (marker) {
     if (!directoryProjection) {
       for (const statement of splitStatements(migration0017)) await env.DB.prepare(statement).run();
@@ -85,6 +89,7 @@ export async function ensureMigrated(): Promise<void> {
     if (!oidcIdentities) for (const statement of splitStatements(migration0022Oidc)) await env.DB.prepare(statement).run();
     if (!oidcSessions) for (const statement of splitStatements(migration0023OidcSessions)) await env.DB.prepare(statement).run();
     if (!hasOidcUsername) for (const statement of splitStatements(migration0024OidcUsername)) await env.DB.prepare(statement).run();
+    await ensureRoadmapSchema();
     return;
   }
   for (const sql of [migration0001, migration0002, migration0003, migration0004, migration0005, migration0006, migration0007, migration0008, migration0009, migration0010, migration0011, migration0012, migration0013, migration0014, migration0015, migration0016, migration0017, migration0018, migration0019, migration0020Bio, migration0021Messaging, migration0022Oidc, migration0023OidcSessions, migration0024OidcUsername]) {
@@ -92,6 +97,36 @@ export async function ensureMigrated(): Promise<void> {
       await env.DB.prepare(statement).run();
     }
   }
+  await ensureRoadmapSchema();
+}
+
+async function ensureRoadmapSchema(): Promise<void> {
+  await env.DB.batch(splitStatements(migration0029Backup).map(statement => env.DB.prepare(statement)));
+  await env.DB.batch(splitStatements(migration0028Voice).map(statement => env.DB.prepare(statement)));
+  if (!await env.DB.prepare("SELECT name FROM sqlite_master WHERE name='room_backup'").first()) {
+    await env.DB.batch(splitStatements(migration0026Archive).map(statement => env.DB.prepare(statement)));
+  }
+  if (!await env.DB.prepare("SELECT name FROM sqlite_master WHERE name='account_action_tokens'").first()) {
+    await env.DB.batch(splitStatements(migration0027Recovery).map(statement => env.DB.prepare(statement)));
+  }
+}
+
+async function prepareSocketFixture(actor: string): Promise<string | undefined> {
+  await ensureMigrated();
+  const localpart = localpartOfActor(actor);
+  if (domainOfActor(actor) === instanceDomain(env)) {
+    await env.DB.prepare("INSERT OR IGNORE INTO users(localpart,display_name,status,created_at,server_role) VALUES (?,?,'active',?,'user')")
+      .bind(localpart, localpart, Date.now()).run();
+    return undefined;
+  }
+  const jti = crypto.randomUUID();
+  await env.DB.batch([
+    env.DB.prepare("INSERT OR IGNORE INTO guest_identity(actor,registered_origin,profile_version,display_name,profile_status,first_seen_at,last_assertion_at) VALUES (?,?,0,?,'active',?,?)")
+      .bind(actor, domainOfActor(actor),localpart,Date.now(),Date.now()),
+    env.DB.prepare("INSERT INTO federation_sessions(jti,actor,issued_at,expires_at) VALUES (?,?,?,?)")
+      .bind(jti,actor,Date.now(),Date.now()+300000),
+  ]);
+  return jti;
 }
 
 export function apiRequest(path: string, init: RequestInit = {}): Promise<Response> {
@@ -181,8 +216,14 @@ export async function connectRoom(
   role: Role = "owner",
   deny = 0
 ): Promise<{ ws: WebSocket; stub: DurableObjectStub<import("../server/src/room-do").RoomDO> }> {
-  await ensureMigrated();
+  const guestSession = await prepareSocketFixture(actor);
+  const [id, kind, resId] = roomRef.split("/");
+  const stronghold = env.STRONGHOLD_DO.getByName(id!);
+  if (!await stronghold.getConfig()) await stronghold.initConfig(id!, id!, "public", `@fixtureowner:${instanceDomain(env)}`);
+  if (!await stronghold.getRoom(resId!)) await stronghold.createRoom(resId!, kind === "sec" ? "section" : "channel", resId!, ["text"], false);
+  if (!await stronghold.getMember(actor)) await stronghold.addMember(actor, role, deny);
   const claims: RoomTokenClaims = {
+    iat: Date.now(), guest_session_jti: guestSession,
     v: 1,
     typ: "room",
     actor,
@@ -215,7 +256,11 @@ export async function connectTips(
   stub: DurableObjectStub<import("../server/src/stronghold-do").StrongholdDO>;
   firstMessage: Promise<Record<string, unknown>>;
 }> {
+  const guestSession = await prepareSocketFixture(actor);
+  const stronghold = env.STRONGHOLD_DO.getByName(strongholdId);
+  if (!await stronghold.getMember(actor)) await stronghold.addMember(actor, role);
   const claims: StrongholdTokenClaims = {
+    iat: Date.now(), guest_session_jti: guestSession,
     v: 1,
     typ: "stronghold",
     actor,
@@ -324,6 +369,7 @@ export function itemReactionFrame(targetSeq: number, name: string, op: "add" | "
 // role tests keep exercising real membership; pass "admin"/"owner" to test the
 // overlay explicitly.
 export async function sessionToken(actor: string, serverRole: ServerRole = "user"): Promise<string> {
+  const guestSession = await prepareSocketFixture(actor);
   if (domainOfActor(actor) === instanceDomain(env)) {
     await ensureMigrated();
     const localpart = localpartOfActor(actor);
@@ -339,9 +385,10 @@ export async function sessionToken(actor: string, serverRole: ServerRole = "user
     typ: "session",
     actor,
     server_role: serverRole,
-    auth_source: "local",
+    auth_source: guestSession ? "federation" : "local",
+    iat: Date.now(),
     exp: Math.floor(Date.now() / 1000) + 300,
-    jti: crypto.randomUUID(),
+    jti: guestSession ?? crypto.randomUUID(),
   };
   return signToken(claims, TEST_SECRET);
 }

@@ -18,6 +18,11 @@ tables=(
   used_challenges totp_attempts stronghold_slug_index stronghold_feature_overrides
   stronghold_directory_index oidc_identities oidc_login_completions oidc_sessions
   user_blocks direct_messages archive_document room_backup
+  own_signing_keys federation_blocklist federation_rate federation_seen federation_sessions
+  federation_assertions federation_rooms federation_events federation_items federation_ephemeral
+  federation_delivery federation_local_profile ownership_pins migration_challenges account_migrations
+  migration_edges actor_aliases migration_announcements federation_host_subscriptions remote_users
+  federation_profile_pending account_action_tokens account_action_limits voice_revocations stronghold_backup
 )
 
 case "$action" in
@@ -33,7 +38,13 @@ case "$action" in
     printf 'Restore into an empty D1 database named %s. Type the database name to continue: ' "$database" >&2
     IFS= read -r confirmation
     [[ "$confirmation" == "$database" ]] || { printf 'Restore cancelled.\n' >&2; exit 1; }
+    for table in "${tables[@]}"; do
+      [[ -f "$directory/$table.sql" ]] || { printf 'Missing table dump: %s.sql\n' "$table" >&2; exit 1; }
+    done
+    existing=$(pnpm exec wrangler d1 execute "$database" --config "$config" --remote --json --command "SELECT COUNT(*) AS count FROM sqlite_master WHERE name='users'" | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>process.stdout.write(String(JSON.parse(s).flatMap(x=>x.results??[])[0].count)))')
+    [[ "$existing" == 0 ]] || { printf 'Target already has an application schema; use a new empty database.\n' >&2; exit 1; }
     pnpm exec wrangler d1 migrations apply "$database" --config "$config" --remote
+    pnpm exec wrangler d1 execute "$database" --config "$config" --remote --yes --command "DELETE FROM instance_config"
     for table in "${tables[@]}"; do
       [[ -f "$directory/$table.sql" ]] || { printf 'Missing table dump: %s.sql\n' "$table" >&2; exit 1; }
       [[ -s "$directory/$table.sql" ]] || continue

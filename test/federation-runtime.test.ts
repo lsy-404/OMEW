@@ -15,6 +15,7 @@ import {
 } from "../server/src/federation-keys";
 import {
   acceptMigrationProof,
+  announceMigration,
   issueMigrationChallenge,
   settleMigrations,
 } from "../server/src/account-migration";
@@ -55,6 +56,16 @@ beforeAll(async () => {
 });
 afterAll(() => vi.restoreAllMocks());
 describe("federation delivery contracts", () => {
+  it("normalizes locally generated Unicode metadata before signing", async () => {
+    const event = await newEvent(home, "stronghold.update", {
+      stronghold: "unicode",
+      name: "e\u0301",
+    });
+    expect(event.payload.name).toBe("é");
+    expect(await verifyEnvelope(peer, event)).toMatchObject({
+      payload: { name: "é" },
+    });
+  });
   it("applies only a contiguous room sequence and folds edits and deletion", async () => {
     const room = "replica/sec/posts";
     await env.DB.prepare(
@@ -251,6 +262,10 @@ describe("ownership migration", () => {
     ).rejects.toBeInstanceOf(ProtocolError);
     const result = await acceptMigrationProof(peer, proof, newActor);
     expect(result.state).toBe("pending");
+    const announcement = await announceMigration(peer, newActor, proof, []);
+    const retry = await announceMigration(peer, newActor, proof, []);
+    expect(retry.id).toBe(announcement.id);
+    expect(retry.ts).toBe(announcement.ts);
     await expect(
       acceptMigrationProof(peer, proof, newActor),
     ).rejects.toMatchObject({ code: "OMEW_CHALLENGE_STALE" });
@@ -276,5 +291,99 @@ describe("ownership migration", () => {
         .bind(oldActor)
         .first(),
     ).toEqual({ new_actor: newActor });
+  });
+
+  it("reports a membership conflict as pending after a valid dual-signed release", async () => {
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const oldActor = `@m${suffix}:home.example`;
+    const newActor = `@m${suffix}:peer.example`;
+    const pair = (await crypto.subtle.generateKey("Ed25519", true, [
+      "sign",
+      "verify",
+    ])) as CryptoKeyPair;
+    const publicKey = base64UrlEncode(
+      new Uint8Array(
+        (await crypto.subtle.exportKey("raw", pair.publicKey)) as ArrayBuffer,
+      ),
+    );
+    const id = await keyId(publicKey);
+    await pinOwnership(peer, oldActor, {
+      key_id: id,
+      public_key: publicKey,
+      created_at: 100,
+    });
+    await env.DB.prepare(
+      "INSERT INTO users(localpart,display_name,status,created_at,server_role) VALUES (?,?,'active',?,'user')",
+    )
+      .bind(`m${suffix}`, "Migration", Date.now())
+      .run();
+    const stronghold = env.STRONGHOLD_DO.getByName(`dual-${suffix}`);
+    await stronghold.initConfig(
+      `dual-${suffix}`,
+      "Conflict",
+      "private",
+      "@operator:peer.example",
+    );
+    await stronghold.addMember(oldActor, "member", 3);
+    await stronghold.addMember(newActor, "mod", 0);
+    const challenge = await issueMigrationChallenge(peer, oldActor, newActor);
+    const claim = {
+      old: oldActor,
+      new: newActor,
+      nonce: challenge.nonce,
+      challenge_origin: challenge.challenge_origin,
+      signed_at: Date.now(),
+    };
+    const proof = {
+      ...claim,
+      ownership_key_id: id,
+      key_history: [],
+      sig: await signObject(
+        "openmew/migration-claim/v1",
+        claim,
+        pair.privateKey,
+      ),
+      home_release: await newEvent(
+        home,
+        "user.update",
+        { moved_to: newActor },
+        { actor: oldActor },
+      ),
+    };
+    const result = await acceptMigrationProof(peer, proof, newActor);
+    expect(result).toMatchObject({
+      mode: "dual_sign",
+      state: "pending",
+      error: expect.stringContaining("OMEW_MIGRATION_CONFLICT"),
+    });
+    expect(await stronghold.getMember(oldActor)).toMatchObject({
+      role: "member",
+      deny: 3,
+    });
+    expect(await stronghold.getMember(newActor)).toMatchObject({
+      role: "mod",
+      deny: 0,
+    });
+    expect(
+      await env.DB.prepare(
+        "SELECT new_actor FROM actor_aliases WHERE old_actor=?",
+      )
+        .bind(oldActor)
+        .first(),
+    ).toBeNull();
+    await stronghold.removeMember(newActor);
+    await settleMigrations(peer);
+    expect(await stronghold.getMember(oldActor)).toBeNull();
+    expect(await stronghold.getMember(newActor)).toMatchObject({
+      role: "member",
+      deny: 3,
+    });
+    expect(
+      await env.DB.prepare(
+        "SELECT state,error FROM account_migrations WHERE old_actor=?",
+      )
+        .bind(oldActor)
+        .first(),
+    ).toEqual({ state: "completed", error: null });
   });
 });

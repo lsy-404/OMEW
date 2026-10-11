@@ -1,11 +1,15 @@
 <script setup lang="ts">
-import { onBeforeUnmount, ref, watch } from "vue";
+import { computed, defineAsyncComponent, onBeforeUnmount, ref, watch } from "vue";
 import { useAuth } from "../composables/useAuth";
 import { API_BASE } from "../api/client";
 import { RoomSocket } from "../api/roomSocket";
+import { processImage } from "../utils/imageProcessing";
+import type { MediaAttachment } from "../api/types";
 import type { RoomItem } from "../api/types";
-import MarkdownContent from "./MarkdownContent.vue";
+const MarkdownContent = defineAsyncComponent(() => import("./MarkdownContent.vue"));
 import MigrationPanel from "./MigrationPanel.vue";
+const VoicePanel = defineAsyncComponent(() => import("./VoicePanel.vue"));
+import MediaGrid from "./MediaGrid.vue";
 const props = defineProps<{ open: boolean }>();
 const emit = defineEmits<{ close: [] }>();
 const auth = useAuth();
@@ -34,7 +38,13 @@ const title = ref("");
 const replyTarget = ref<number | null>(null);
 const live = ref(false);
 const pinDocument = ref("");
-let remoteToken = "";
+const remoteToken = ref("");
+const selectedRoom = computed(() =>
+  rooms.value.find((entry) => (entry.id ?? entry.res_id) === room.value),
+);
+const nextBefore = ref<number | null>(null);
+const attachments = ref<MediaAttachment[]>([]);
+const privateId = ref("");
 let socket: RoomSocket | null = null;
 let generation = 0;
 async function request<T>(
@@ -48,7 +58,7 @@ async function request<T>(
     {
       method: method ?? (body === undefined ? "GET" : "POST"),
       headers: {
-        Authorization: `Bearer ${remote ? remoteToken : auth.token.value}`,
+        Authorization: `Bearer ${remote ? remoteToken.value : auth.token.value}`,
         "Content-Type": "application/json",
       },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
@@ -67,10 +77,11 @@ function stop() {
   generation++;
   socket?.close();
   socket = null;
-  remoteToken = "";
+  remoteToken.value = "";
   connected.value = false;
   live.value = false;
   items.value = [];
+  attachments.value = [];
   rooms.value = [];
   strongholds.value = [];
   stronghold.value = "";
@@ -98,18 +109,22 @@ async function load() {
 }
 async function connect() {
   if (!trusted.value || !peers.value.includes(peer.value)) return;
+  const current = generation;
+  const target = peer.value;
   await run(async () => {
     const assertion = await request<unknown>("/api/federation/assertion", {
       peer: peer.value,
     });
-    const response = await fetch(`https://${peer.value}/federation/session`, {
+    if (current !== generation) return;
+    const response = await fetch(`https://${target}/federation/session`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(assertion),
     });
     const session = await response.json();
     if (!response.ok) throw new Error(session.error?.code ?? "身份交换失败");
-    remoteToken = session.token;
+    if (current !== generation) return;
+    remoteToken.value = session.token;
     connected.value = true;
     const storageKey = `openmew-links:${auth.user.value?.actor}`;
     const stored = JSON.parse(
@@ -122,14 +137,18 @@ async function connect() {
     const descriptor = await request<{
       public_strongholds: Array<{ id: string; name: string }>;
     }>("/api/federation/descriptor", { peer: peer.value });
-    const memberships = await request<{
-      strongholds: Array<{ id: string; name: string }>;
-    }>("/api/me/strongholds", undefined, true);
+    const memberships = await request<Array<{ id: string; name: string }>>(
+      "/api/me/strongholds",
+      undefined,
+      true,
+    );
+    if (current !== generation) return;
     strongholds.value = [
       ...new Map(
-        [...descriptor.public_strongholds, ...memberships.strongholds].map(
-          (node) => [node.id, node],
-        ),
+        [...descriptor.public_strongholds, ...memberships].map((node) => [
+          node.id,
+          node,
+        ]),
       ).values(),
     ];
   });
@@ -139,36 +158,53 @@ async function openStronghold() {
     socket?.close();
     items.value = [];
     await request(`/api/stronghold/${stronghold.value}/join`, {}, true);
-    const result = await request<{
-      rooms: Array<{
+    const result = await request<
+      Array<{
         id: string;
         res_id?: string;
         type: string;
         name: string;
         capabilities?: string[];
-      }>;
-    }>(`/api/stronghold/${stronghold.value}/rooms`, undefined, true);
-    rooms.value = result.rooms;
-    room.value = result.rooms[0]?.id ?? result.rooms[0]?.res_id ?? "";
+      }>
+    >(`/api/stronghold/${stronghold.value}/rooms`, undefined, true);
+    rooms.value = result;
+    room.value = result[0]?.id ?? result[0]?.res_id ?? "";
   });
   if (room.value) await openRoom();
 }
-async function reloadItems() {
-  const result = await request<{ items: RoomItem[] }>(
-    `/stronghold/${stronghold.value}/rooms/${room.value}/history`,
+async function reloadItems(older = false) {
+  const current = generation;
+  const result = await request<{
+    items: RoomItem[];
+    next_before: number | null;
+  }>(
+    `/stronghold/${stronghold.value}/rooms/${room.value}/history${older && nextBefore.value !== null ? `?before=${nextBefore.value}` : ""}`,
     undefined,
     true,
   );
-  items.value = [...result.items].reverse();
+  if (current !== generation) return;
+  const page = [...result.items].reverse();
+  items.value = older ? [...page, ...items.value] : page;
+  nextBefore.value = result.next_before;
+}
+function remoteMedia(item: RoomItem) {
+  return (item.body.media ?? []).map((media) => ({
+    ...media,
+    url: media.url.startsWith("/media/")
+      ? `https://${peer.value}${media.url}`
+      : media.url,
+  }));
 }
 async function openRoom() {
   await run(async () => {
     socket?.close();
+    attachments.value = [];
     const current = ++generation;
     const selected = rooms.value.find(
       (entry) => (entry.id ?? entry.res_id) === room.value,
     );
     await reloadItems();
+    if (current !== generation) return;
     socket = new RoomSocket({
       wsPath: `wss://${peer.value}/stronghold/${stronghold.value}/rooms/${room.value}/ws`,
       mint: () =>
@@ -197,12 +233,14 @@ async function openRoom() {
             });
         },
         onUpdate(update) {
+          if (current !== generation) return;
           const row = items.value.find(
             (item) => item.seq === update.target_seq,
           );
           if (row) row.body = update.body as RoomItem["body"];
         },
         onDelete(deletion) {
+          if (current !== generation) return;
           items.value = items.value.filter(
             (item) => item.seq !== deletion.target_seq,
           );
@@ -227,8 +265,49 @@ async function openRoom() {
       });
   });
 }
+async function uploadAttachment(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+  if (!file || !remoteToken.value || attachments.value.length >= 8) return;
+  await run(async () => {
+    const current = generation;
+    const processed = await processImage(file, { mode: "smart" });
+    if (current !== generation || !remoteToken.value) return;
+    const response = await fetch(`https://${peer.value}/api/media`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${remoteToken.value}`,
+        "Content-Type": processed.mime,
+      },
+      body: processed.blob,
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error ?? "UPLOAD_FAILED");
+    if (current !== generation || !remoteToken.value) return;
+    attachments.value.push({
+      id: result.id,
+      url: result.url,
+      mime: result.mime,
+    });
+  });
+}
+async function requestPrivateJoin() {
+  await run(async () => {
+    await request("/api/federation/join-request", {
+      peer: peer.value,
+      stronghold: privateId.value.trim(),
+    });
+    error.value = "申请已发送，等待据点管理员批准。";
+  });
+}
 function send() {
-  if (!text.value.trim() || !socket || !live.value) return;
+  if (
+    (!text.value.trim() && !attachments.value.length) ||
+    !socket ||
+    !live.value
+  )
+    return;
   const selected = rooms.value.find(
     (entry) => (entry.id ?? entry.res_id) === room.value,
   );
@@ -242,25 +321,32 @@ function send() {
     replyTarget.value === null ? "post" : "reply",
     {
       text: text.value,
+      ...(attachments.value.length ? { media: attachments.value } : {}),
       ...(section && replyTarget.value === null ? { title: title.value } : {}),
     },
     replyTarget.value,
   );
   if (sent) {
     text.value = "";
+    attachments.value = [];
     title.value = "";
     replyTarget.value = null;
   }
 }
-async function admin(action: "discover" | "rotate" | "block" | "pin") {
+async function admin(
+  action: "discover" | "rotate" | "block" | "unblock" | "pin",
+) {
   await run(async () => {
     await request(
-      `/api/admin/federation/${action === "rotate" ? "keys/rotate" : action}`,
+      `/api/admin/federation/${action === "rotate" ? "keys/rotate" : action === "unblock" ? "block" : action}`,
       action === "rotate"
         ? {}
         : action === "pin"
           ? { peer: peer.value, document: JSON.parse(pinDocument.value) }
-          : { peer: peer.value },
+          : {
+              peer: peer.value,
+              ...(action === "unblock" ? { blocked: false } : {}),
+            },
     );
     error.value = "操作已完成";
   });
@@ -333,6 +419,7 @@ onBeforeUnmount(stop);
             >
               阻止此对端
             </button>
+            <button type="button" :disabled="busy || !peer" @click="admin('unblock')">解除阻止</button>
             <label
               >已核验的离线公钥文档<textarea v-model="pinDocument" />
             </label>
@@ -348,7 +435,8 @@ onBeforeUnmount(stop);
             <template v-if="!connected"
               ><label
                 ><input v-model="trusted" type="checkbox" />我信任
-                {{ peer }} 的运营者处理消息明文并为此实例内的发言背书。</label
+                {{ peer }}
+                的运营者可读取消息明文，并可在其房间内以我的身份发表消息。</label
               ><button
                 type="button"
                 :disabled="busy || !trusted || !peer"
@@ -358,6 +446,20 @@ onBeforeUnmount(stop);
               </button></template
             >
             <template v-else>
+              <button type="button" :disabled="busy" @click="connect">
+                刷新社区列表
+              </button>
+              <form @submit.prevent="requestPrivateJoin">
+                <label
+                  >申请加入私密据点<input
+                    v-model="privateId"
+                    placeholder="据点 ID"
+                    maxlength="64"
+                /></label>
+                <button type="submit" :disabled="busy || !privateId.trim()">
+                  发送申请
+                </button>
+              </form>
               <label
                 >据点<select v-model="stronghold" @change="openStronghold">
                   <option value="">选择据点</option>
@@ -381,13 +483,34 @@ onBeforeUnmount(stop);
                   </option>
                 </select></label
               >
+              <VoicePanel
+                v-if="selectedRoom?.capabilities?.includes('voice') && room"
+                :stronghold-id="stronghold"
+                :room-id="room"
+                :room-name="selectedRoom.name"
+                :origin="`https://${peer}`"
+                :session-token="remoteToken"
+              />
+              <button
+                v-if="nextBefore !== null"
+                type="button"
+                :disabled="busy"
+                @click="run(() => reloadItems(true))"
+              >
+                加载更早的消息
+              </button>
               <div class="federation-content">
                 <article v-for="item in items" :key="item.seq">
                   <small>{{ item.actor }}</small
                   ><strong v-if="item.body.title">{{ item.body.title }}</strong
-                  ><MarkdownContent :text="item.body.text ?? ''" /><button
+                  ><MarkdownContent :text="item.body.text ?? ''" /><MediaGrid
+                    v-if="item.body.media?.length"
+                    :media="remoteMedia(item)"
+                  /><button
                     v-if="
-                      item.parent_seq === null || item.parent_seq === undefined
+                      selectedRoom?.type === 'section' &&
+                      (item.parent_seq === null ||
+                        item.parent_seq === undefined)
                     "
                     type="button"
                     @click="replyTarget = item.seq"
@@ -414,7 +537,33 @@ onBeforeUnmount(stop);
                   v-model="text"
                   placeholder="消息或帖子正文"
                   aria-label="消息或帖子正文"
-                /><button type="submit" :disabled="!live || !text.trim()">
+                />
+                <label
+                  >图片附件<input
+                    type="file"
+                    accept="image/*"
+                    :disabled="busy"
+                    @change="uploadAttachment"
+                /></label>
+                <span v-for="attachment in attachments" :key="attachment.id"
+                  >{{ attachment.mime }}
+                  <button
+                    type="button"
+                    @click="
+                      attachments = attachments.filter(
+                        (item) => item.id !== attachment.id,
+                      )
+                    "
+                  >
+                    移除
+                  </button></span
+                >
+                <button
+                  type="submit"
+                  :disabled="
+                    !live || busy || (!text.trim() && !attachments.length)
+                  "
+                >
                   发送
                 </button>
               </form>

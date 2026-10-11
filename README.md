@@ -1,12 +1,12 @@
 # OpenMew (OMEW)
 
-开源、可自部署的兴趣社群平台：以「据点」组织实时聊天频道与帖子分区。Cloudflare Workers 全栈，单人可运维；多实例联邦协议已经冻结，运行时仍在后续版本中实现。
+开源、可自部署的兴趣社群平台：以「据点」组织实时聊天频道与帖子分区。Cloudflare Workers 全栈，包含多实例联邦、历史归档与搜索、账号迁移和自建 SFU 语音。
 
-Open-source, self-hostable community platform built around strongholds, realtime chat channels, and post sections. It runs entirely on Cloudflare Workers; the federation protocol is specified while the cross-instance runtime remains planned work.
+Open-source, self-hostable community platform built around strongholds, realtime chat channels, and post sections, with signed federation, searchable archives, account migration, and self-hosted SFU voice.
 
 ## OMEW 1.0.0
 
-首个正式版本已经完成单实例社区闭环：公开首页与据点目录、账号与通行密钥、实时聊天、LiveKit 语音频道、Markdown 帖子、图片与表情、成员资料、私信、权限组、封禁和临时功能限制。
+首个正式版本已经完成单实例社区闭环：公开首页与据点目录、账号与通行密钥、实时聊天、Markdown 帖子、图片与表情、成员资料、私信、权限组、封禁和临时功能限制。开发主线另已包含联邦、归档搜索、账号恢复与迁移，以及 LiveKit 语音；这些变化需按下列部署文档配置服务与迁移数据库。
 
 推荐通过 [Overture 在线部署器](https://overture.lsy-demo.workers.dev/?src=lsy-404%2FOMEW) 安装。链接已经预选 `lsy-404/OMEW`，无需本地工具链；安装器会列出将创建的 Worker、D1、R2、Durable Objects 与所需权限，再把 OMEW 部署到你自己的 Cloudflare 账户。
 
@@ -29,10 +29,13 @@ SSO 首次登录会导入提供方的 `nickname`（未提供时使用 `name` 或
 - [项目书 v0.2](docs/proposal-v0.2.md) —— 设计文档(架构、数据模型、联邦、成本)
 - [M0 协议规范草案](docs/m0-protocol-draft.md) —— 事件信封、签名、联邦会话、迁移协议
 - [LiveKit 语音部署](docs/voice-sfu.md) —— 本地开发、自部署 SFU、Worker 配置与真实音轨验收
+- [联邦与账号迁移](docs/federation-operations.md) —— 对端信任、订阅、签名和迁移操作
+- [归档与备份恢复](docs/archive-backup-restore.md) —— 历史分页、全文搜索、快照和灾难恢复
+- [账号验证与恢复](docs/account-operations.md) —— Email Service、Turnstile 与运维重置
 
 ## 状态 / Status
 
-1.0.0 单实例核心可用；M0 联邦协议草案完成，LiveKit 语音已接入；跨实例联邦与归档搜索仍属于后续里程碑。
+开发主线已实现 M2–M7 的签名、归档、帖子联邦、频道会话、逐边迁移和 SFU 语音，以及邮箱验证、密码恢复和注册 Turnstile。语音和邮件的线上启用需要部署者配置对应服务。
 
 ## License
 

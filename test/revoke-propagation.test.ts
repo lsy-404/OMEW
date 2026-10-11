@@ -96,7 +96,7 @@ describe("member.revoke propagation (m0-protocol §7.3)", () => {
     expect(err).toMatchObject({ type: "error", code: "OMEW_FORBIDDEN" });
   });
 
-  // task 048: groups are server-level D1 rows (server_groups/user_server_groups)
+  // Groups are server-level D1 rows (server_groups/user_server_groups)
   // rather than a per-DO table - inserted directly here to isolate this suite's
   // focus (StrongholdDO's revocation push) from the admin HTTP surface, which
   // has its own coverage in test/server-groups.test.ts. revokeActor is the
@@ -114,6 +114,7 @@ describe("member.revoke propagation (m0-protocol §7.3)", () => {
     await stub.addMember(target, "member");
     const localpart = target.slice(1, target.indexOf(":"));
     await registerUser({ username: localpart, password: "password123", ...OWNERSHIP });
+    await env.DB.prepare("UPDATE users SET server_role='user' WHERE localpart=?").bind(localpart).run();
     await env.DB.prepare("INSERT INTO user_server_groups (localpart, group_id) VALUES (?, ?)").bind(localpart, groupId).run();
 
     const roomRef = `${id}/ch/general`;

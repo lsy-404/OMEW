@@ -177,11 +177,11 @@ describe("item.reaction (m0-protocol §3.2a)", () => {
 
     // Confirms the deny bit really is blocking ordinary writes for this connection.
     memberWs.send(itemCreateFrame("m2", "should be denied"));
-    expect(await nextMessage(memberWs)).toMatchObject({ type: "error", code: "OMEW_FORBIDDEN" });
+    expect(await nextMessageOfType(memberWs,"error")).toMatchObject({ type: "error", code: "OMEW_FORBIDDEN" });
 
     // But reacting is engagement, not content write - §3.4 deny bits MUST NOT apply.
     memberWs.send(itemReactionFrame(seq, "thumbsup", "add"));
-    const snapshot = await nextMessage(memberWs);
+    const snapshot = await nextMessageOfType(memberWs,"item.reaction");
     expect(snapshot).toMatchObject({
       type: "item.reaction",
       target_seq: seq,

@@ -16,7 +16,7 @@ import { federationRoutes } from "./federation-routes";
 import { failure as protocolFailure, ProtocolError } from "./federation-codec";
 import { consumeDeadLetters, consumeFederationQueue, runFederationMaintenance, validGuestSession, type Delivery } from "./federation";
 import { ftsQuery, searchableText } from "./archive";
-import { createVoiceAccessToken, revokeVoiceParticipantFromStronghold, revokeVoiceRoomParticipants, VoiceUnavailableError } from "./voice";
+import { createVoiceAccessToken, revokeVoiceParticipantFromStronghold, revokeVoiceRoomParticipants, VoiceUnavailableError, retryVoiceRevocations } from "./voice";
 import {
   beginOidcAuthorization,
   clearOidcTransactionCookie,
@@ -672,7 +672,7 @@ async function requireSession(request: Request, env: Env): Promise<SessionTokenC
   if (domainOfActor(claims.actor) !== instanceDomain(env)) {
     if (!await validGuestSession(env,claims)) return apiError(401,"AUTH_REQUIRED");
     const path=new URL(request.url).pathname;
-    if (path.startsWith("/api/me/") && path!=="/api/me/strongholds" && path!=="/api/me/storage") return apiError(403,"HOME_ACCOUNT_REQUIRED");
+    if (path.startsWith("/api/me/") && path!=="/api/me/strongholds" && path!=="/api/me/storage") throw new ProtocolError(403,"HOME_ACCOUNT_REQUIRED");
     return { ...claims, server_role: "user" };
   }
   if (claims.auth_source === "federation") return apiError(401,"AUTH_REQUIRED");
@@ -762,7 +762,7 @@ async function requireServerRole(
 // no real membership (and no overlay), or banned with no overlay.
 function overlayRole(serverRole: ServerRole, member: MemberRow | null): Role | null {
   if (serverRole === "owner" || serverRole === "admin") return "owner";
-  if (!member || member.banned_at) return null;
+  if (!member || member.banned_at || member.application_state !== "approved") return null;
   return member.role;
 }
 
@@ -782,7 +782,7 @@ async function effectiveRole(
   if (serverRole === "owner" || serverRole === "admin") return { role: "owner", deny: 0 };
   const stub = env.STRONGHOLD_DO.getByName(strongholdId);
   const member = await stub.getMember(actor);
-  if (!member || member.banned_at) return null;
+  if (!member || member.banned_at || member.application_state !== "approved") return null;
   if (member.role !== "member") return { role: member.role, deny: 0 };
   // Guests (federated actors) have no users row and thus no server groups.
   if (domainOfActor(actor) !== instanceDomain(env)) {
@@ -901,7 +901,13 @@ export default {
     }
 
     try {
-      return await route(request, env, url);
+      const response=await route(request, env, url);
+      if (response.ok && ["POST","DELETE"].includes(request.method) && /^\/api\/me\/(display-name|bio|avatar|cover)$/.test(url.pathname)) {
+        const token=request.headers.get("Authorization")?.slice(7);
+        const claims=token?await verifyToken<SessionTokenClaims>(token,env.DEV_TOKEN_SECRET):null;
+        if (claims && domainOfActor(claims.actor)===instanceDomain(env,url.hostname)) await env.DB.prepare("INSERT INTO federation_profile_pending(actor,updated_at) VALUES (?,?) ON CONFLICT(actor) DO UPDATE SET updated_at=excluded.updated_at").bind(claims.actor,Date.now()).run();
+      }
+      return response;
     } catch (err) {
       if (err instanceof ProtocolError) return protocolFailure(err);
       if (err instanceof EmailVerificationRequired) return apiError(403, "EMAIL_VERIFICATION_REQUIRED");
@@ -914,7 +920,8 @@ export default {
     else await consumeFederationQueue(batch, env);
   },
   async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
-    await runFederationMaintenance(env);
+    const results = await Promise.allSettled([runFederationMaintenance(env), retryVoiceRevocations(env)]);
+    for (const result of results) if (result.status === "rejected") console.error(JSON.stringify({level:"error",event:"maintenance.failed",error:String(result.reason)}));
   },
 };
 
@@ -2082,6 +2089,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
       await env.DB.prepare(
         "UPDATE users SET status = 'active', banned_at = NULL, banned_by = NULL, banned_until = NULL WHERE localpart = ? AND status = 'banned'"
       ).bind(localpart).run();
+      await env.DB.prepare("INSERT INTO federation_profile_pending(actor,updated_at) VALUES (?,?) ON CONFLICT(actor) DO UPDATE SET updated_at=excluded.updated_at").bind(targetActor,Date.now()).run();
       return new Response(null, { status: 204, headers: cors() });
     }
 
@@ -2093,6 +2101,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     await env.DB.prepare(
       "UPDATE users SET status = 'banned', banned_at = ?, banned_by = ?, banned_until = ? WHERE localpart = ?"
     ).bind(bannedAt, gate.actor, expiresAt, localpart).run();
+    await env.DB.prepare("INSERT INTO federation_profile_pending(actor,updated_at) VALUES (?,?) ON CONFLICT(actor) DO UPDATE SET updated_at=excluded.updated_at").bind(targetActor,Date.now()).run();
     // Server admins may be connected through the server-role overlay without a
     // membership-index row, so enumerate the global stronghold slug index.
     const { results } = await env.DB.prepare("SELECT DISTINCT stronghold_id FROM stronghold_slug_index")
@@ -2443,7 +2452,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     const pack = await env.DB.prepare("SELECT id FROM emote_packs WHERE id = ?").bind(emotePackDeleteMatch.id!).first();
     if (!pack) return apiError(404, "NOT_FOUND");
     // Cascades the pack's emote rows only - the underlying media rows/objects
-    // outlive the pack (proposal §11: asset lifecycle stays with 017's pipeline).
+    // Media outlives its emote pack because ownership stays with the uploader.
     await env.DB.batch([
       env.DB.prepare("DELETE FROM emotes WHERE pack_id = ?").bind(emotePackDeleteMatch.id!),
       env.DB.prepare("DELETE FROM emote_packs WHERE id = ?").bind(emotePackDeleteMatch.id!),
@@ -2852,7 +2861,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
         if (r.type !== "section") return toApiRoom(r);
         const roomRef = `${strongholdId}/${typeToKind(r.type)}/${r.res_id}`;
         const roomStub = env.ROOM_DO.getByName(roomRef);
-        const postCount = await roomStub.countPosts();
+        const postCount = await roomStub.countPosts(gate.kind === "member" ? gate.actor : null);
         return toApiRoom(r, postCount);
       })
     );
@@ -2929,15 +2938,16 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     if (!config) return apiError(404, "NOT_FOUND");
 
     const existing = await stub.getMember(actor);
-    if (existing) {
+    if (existing?.application_state === "approved" || existing?.banned_at) {
       if (existing.banned_at) return apiError(403, "FORBIDDEN");
       const profiles = await actorProfiles(env, [actor]);
       return json(toMemberEntry(existing, profiles.get(actor)));
     }
-    // §7.2/§9 placeholder: private strongholds need a join_request flow (M6-era
-    // federation feature); until then this is the explicit "not implemented yet"
-    // signal rather than a silent 403 FORBIDDEN.
-    if (config.visibility === "private") return apiError(403, "JOIN_REQUIRES_APPLICATION");
+    if (config.visibility === "private") {
+      const pending=await stub.requestMembership(actor);
+      if(!pending) return apiError(403,"FORBIDDEN");
+      return json({state:pending.application_state},202);
+    }
 
     const member = await stub.addMember(actor, "member", 0, false);
     const profiles = await actorProfiles(env, [actor]);
@@ -2988,7 +2998,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
           // post_count is deliberately absent here: it costs one DO call per
           // section and this list loads on every app start. The by-id rooms
           // endpoint carries it for the places that actually show counts.
-          rooms: visibleRooms.map((room) => ({ id: room.res_id, name: room.name, type: room.type, description: room.description })),
+          rooms: visibleRooms.map((room) => toApiRoom(room)),
         };
       })
     );
@@ -3165,6 +3175,9 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     const { results: backupRows } = await env.DB.prepare(
       "SELECT r2_key FROM room_backup WHERE do_key = ? OR instr(do_key, ?) = 1"
     ).bind(strongholdId, archivePrefix).all<{ r2_key: string }>();
+    const { results: governanceBackups } = await env.DB.prepare(
+      "SELECT r2_key FROM stronghold_backup WHERE stronghold_id = ?"
+    ).bind(strongholdId).all<{ r2_key: string }>();
     const { results: searchRows } = await env.DB.prepare(
       "SELECT rowid, do_key, seq, text, actor, ts, kind, root_seq FROM archive_document WHERE do_key = ? OR instr(do_key, ?) = 1"
     ).bind(strongholdId, archivePrefix).all<{
@@ -3176,7 +3189,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
 
     // A failed archive deletion keeps the config and indexes intact so the
     // owner can retry; child RoomDO deletion is idempotent.
-    await Promise.all([...new Set([...archiveRows, ...backupRows].map((row) => row.r2_key))].map((key) => env.MEDIA.delete(key)));
+    await Promise.all([...new Set([...archiveRows, ...backupRows, ...governanceBackups].map((row) => row.r2_key))].map((key) => env.MEDIA.delete(key)));
     for (let offset = 0; offset < searchRows.length; offset += 50) {
       const statements = searchRows.slice(offset, offset + 50).map((row) => env.DB.prepare(
         "INSERT INTO archive_search(archive_search, rowid, do_key, seq, text, actor, ts, kind, root_seq) VALUES ('delete', ?, ?, ?, ?, ?, ?, ?, ?)"
@@ -3195,11 +3208,32 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
       env.DB.prepare("DELETE FROM archive_index WHERE do_key = ? OR instr(do_key, ?) = 1").bind(strongholdId, `${strongholdId}/`),
       env.DB.prepare("DELETE FROM archive_document WHERE do_key = ? OR instr(do_key, ?) = 1").bind(strongholdId, `${strongholdId}/`),
       env.DB.prepare("DELETE FROM room_backup WHERE do_key = ? OR instr(do_key, ?) = 1").bind(strongholdId, `${strongholdId}/`),
+      env.DB.prepare("DELETE FROM stronghold_backup WHERE stronghold_id = ?").bind(strongholdId),
     ]);
     await stub.purgeForStrongholdDeletion();
     return new Response(null, { status: 204, headers: cors() });
   }
 
+  m=match("/api/stronghold/:id/join-requests",path);
+  if(m && method==="GET") {
+    const gate=await requireRole(request,env,m.id!,["owner","mod"]);
+    if(gate instanceof Response) return gate;
+    const members=(await env.STRONGHOLD_DO.getByName(m.id!).listMembers()).filter(member=>member.application_state==="pending" && !member.banned_at);
+    const profiles=await actorProfiles(env,members.map(member=>member.actor));
+    return json({entries:members.map(member=>toMemberEntry(member,profiles.get(member.actor)))});
+  }
+  m=match("/api/stronghold/:id/join-requests/:actor",path);
+  if(m && method==="PATCH") {
+    const session=await requireSession(request,env);
+    if(session instanceof Response) return session;
+    const eff=await effectiveRole(env,m.id!,session.server_role,session.actor);
+    if(!eff || eff.role==="member") return apiError(403,"FORBIDDEN");
+    const body=await readJsonBody(request);
+    if(!body || (body.state!=="approved" && body.state!=="rejected")) return apiError(400,"STATE_INVALID");
+    const member=await env.STRONGHOLD_DO.getByName(m.id!).decideMembership(m.actor!,body.state==="approved",session.actor);
+    if(!member) return apiError(409,"ALREADY_DECIDED");
+    return json({actor:member.actor,state:member.application_state});
+  }
   m = match("/api/stronghold/:id/members", path);
   if (m && method === "GET") {
     const session = await requireSession(request, env);
@@ -3212,7 +3246,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     if (tab !== "all" && tab !== "restricted" && tab !== "banned") return apiError(400, "TAB_INVALID");
     const after = url.searchParams.get("after");
 
-    const all = await stub.listMembers();
+    const all = (await stub.listMembers()).filter(member=>member.application_state==="approved");
     const filtered =
       tab === "banned"
         ? all.filter((entry) => entry.banned_at != null)
@@ -3549,13 +3583,14 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     const eff = await effectiveRole(env, m.id!, session.server_role, session.actor);
     if (!eff) return errorResponse(403, "OMEW_BANNED", "not a member or banned");
     const room = await strongholdStub.getRoom(m.resId!);
-    if (!room) return errorResponse(404, "OMEW_ROOM_NOT_FOUND", "room not found");
+    if (!room || room.archived) return errorResponse(404, "OMEW_ROOM_NOT_FOUND", "room not found");
     if (!canAccessRestrictedRoom(eff.role, room)) {
       return errorResponse(404, "OMEW_ROOM_NOT_FOUND", "room not found");
     }
     const roomRef = `${m.id!}/${typeToKind(room.type)}/${m.resId!}`;
     const claims: RoomTokenClaims = {
       v: 1, typ: "room", actor: session.actor, room: roomRef, role: eff.role, deny: eff.deny,
+      iat: session.iat, ...(session.auth_source === "federation" ? {guest_session_jti:session.jti} : {}),
       exp: nowS() + ROOM_TOKEN_TTL_S, jti: newJti(),
     };
     const token = await signToken(claims, env.DEV_TOKEN_SECRET);
@@ -3572,6 +3607,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     if (!eff) return errorResponse(403, "OMEW_BANNED", "not a member or banned");
     const claims: StrongholdTokenClaims = {
       v: 1, typ: "stronghold", actor: session.actor, stronghold: m.id!, role: eff.role,
+      iat: session.iat, ...(session.auth_source === "federation" ? {guest_session_jti:session.jti} : {}),
       exp: nowS() + ROOM_TOKEN_TTL_S, jti: newJti(),
     };
     const token = await signToken(claims, env.DEV_TOKEN_SECRET);
@@ -3603,6 +3639,78 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
   }
 
   // ---- history proxy (S5.3: seq-anchored pagination) -------------------------------
+
+  m = match("/api/stronghold/:id/backups", path);
+  if (m && method === "GET") {
+    const session = await requireSession(request, env);
+    if (session instanceof Response) return session;
+    const config = await env.STRONGHOLD_DO.getByName(m.id!).getConfig();
+    if (config) {
+      const owner = await requireStrongholdOwner(request, env, m.id!);
+      if (owner instanceof Response) return owner;
+    }
+    const backups = await env.DB.prepare(
+      "SELECT id AS backup_id,created_at,byte_length AS bytes,sha256 FROM stronghold_backup WHERE stronghold_id=? AND (?=1 OR owner_actor=?) ORDER BY created_at DESC LIMIT 100"
+    ).bind(m.id!,config || session.server_role==="owner" ? 1 : 0,session.actor).all();
+    return json({ backups:backups.results });
+  }
+  if (m && method === "POST") {
+    const owner = await requireStrongholdOwner(request, env, m.id!);
+    if (owner instanceof Response) return owner;
+    const stronghold = env.STRONGHOLD_DO.getByName(m.id!);
+    const config = (await stronghold.getConfig())!;
+    const backupId = crypto.randomUUID();
+    const snapshot = await stronghold.exportSnapshot(backupId);
+    const createdAt = Date.now();
+    await env.DB.prepare(
+      "INSERT INTO stronghold_backup(id,stronghold_id,owner_actor,r2_key,created_at,sha256,byte_length) VALUES (?,?,?,?,?,?,?)"
+    ).bind(backupId,m.id!,config.owner_actor,snapshot.r2_key,createdAt,snapshot.sha256,snapshot.bytes).run();
+    return json({backup_id:backupId,stronghold:m.id!,created_at:createdAt,bytes:snapshot.bytes,sha256:snapshot.sha256});
+  }
+
+  m = match("/api/stronghold/:id/backups/:backupId", path);
+  if (m && method === "GET") {
+    const session = await requireSession(request,env);
+    if (session instanceof Response) return session;
+    const backup = await env.DB.prepare(
+      "SELECT owner_actor,r2_key,byte_length FROM stronghold_backup WHERE id=? AND stronghold_id=?"
+    ).bind(m.backupId!,m.id!).first<{owner_actor:string;r2_key:string;byte_length:number}>();
+    if (!backup) return apiError(404,"BACKUP_NOT_FOUND");
+    const config = await env.STRONGHOLD_DO.getByName(m.id!).getConfig();
+    if (config) {
+      const owner = await requireStrongholdOwner(request,env,m.id!);
+      if(owner instanceof Response) return owner;
+    } else if(backup.owner_actor!==session.actor && session.server_role!=="owner") return apiError(403,"FORBIDDEN");
+    const object = await env.MEDIA.get(backup.r2_key);
+    if(!object?.body) return apiError(404,"BACKUP_NOT_FOUND");
+    return new Response(object.body,{headers:{
+      "Content-Type":"application/gzip","Content-Length":String(backup.byte_length),
+      "Content-Disposition":`attachment; filename="omew-stronghold-${m.backupId!}.ndjson.gz"`,
+      "Cache-Control":"private, no-store",
+    }});
+  }
+
+  m = match("/api/stronghold/:id/restore",path);
+  if(m && method==="POST") {
+    const session = await requireSession(request,env);
+    if(session instanceof Response) return session;
+    const body = await request.json().catch(()=>null) as {backup_id?:unknown}|null;
+    if(!body || typeof body.backup_id!=="string") return apiError(400,"MALFORMED");
+    const backup = await env.DB.prepare(
+      "SELECT owner_actor,r2_key,sha256 FROM stronghold_backup WHERE id=? AND stronghold_id=?"
+    ).bind(body.backup_id,m.id!).first<{owner_actor:string;r2_key:string;sha256:string}>();
+    if(!backup) return apiError(404,"BACKUP_NOT_FOUND");
+    if(backup.owner_actor!==session.actor && session.server_role!=="owner") return apiError(403,"FORBIDDEN");
+    try {
+      const restored_rows = await env.STRONGHOLD_DO.getByName(m.id!).restoreSnapshot(body.backup_id,backup.r2_key,backup.sha256);
+      return json({restored_rows,stronghold:m.id!});
+    } catch(error) {
+      const message = String(error);
+      if(message.includes("not empty")) return apiError(409,"RESTORE_TARGET_NOT_EMPTY");
+      if(message.includes("snapshot")) return apiError(400,"BACKUP_INVALID");
+      throw error;
+    }
+  }
 
   m = match("/api/stronghold/:id/rooms/:resId/backups", path);
   if (m && method === "GET") {
@@ -3694,13 +3802,17 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     const fts = ftsQuery(query);
     if (!fts) return json({ items: [] });
     const roomRef = `${m.id!}/${typeToKind(room.type)}/${m.resId!}`;
-    const archived = await env.DB.prepare(
+    const archived = /[\u3400-\u9fff]/u.test(query)
+      ? await env.DB.prepare(
+        "SELECT seq,text,actor,ts,kind,root_seq FROM archive_document WHERE do_key=? AND " + query.split(/\s+/).filter(Boolean).slice(0,16).map(()=>"text LIKE ? ESCAPE '\\'").join(" AND ") + " ORDER BY CAST(ts AS INTEGER) DESC, CAST(seq AS INTEGER) DESC LIMIT 100"
+      ).bind(roomRef,...query.split(/\s+/).filter(Boolean).slice(0,16).map(term=>`%${term.replace(/[\\%_]/g,match=>`\\${match}`)}%`)).all<{seq:string;text:string;actor:string;ts:string;kind:string;root_seq:string}>()
+      : await env.DB.prepare(
       "SELECT seq, text, actor, ts, kind, root_seq FROM archive_search WHERE archive_search MATCH ? AND do_key = ? " +
       "ORDER BY CAST(ts AS INTEGER) DESC, CAST(seq AS INTEGER) DESC LIMIT 100"
     ).bind(fts, roomRef).all<{ seq: string; text: string; actor: string; ts: string; kind: string; root_seq: string }>();
     const roomStub = env.ROOM_DO.getByName(roomRef);
     const visibleArchived = await roomStub.applyArchiveSearchOverlays(
-      archived.results.map((row) => ({ ...row, seq: Number(row.seq), ts: Number(row.ts), root_seq: row.root_seq ? Number(row.root_seq) : 0 })), query
+      archived.results.map((row) => ({ ...row, seq: Number(row.seq), ts: Number(row.ts), root_seq: row.root_seq ? Number(row.root_seq) : 0 })), query, gate.kind === "member" ? gate.actor : null
     );
     const hot = await roomStub.searchRecent(query, 100, gate.kind === "member" ? gate.actor : null) as Array<{
       seq: number; actor: string; ts: number; kind: string; root_seq: number | null; body: unknown;
@@ -4609,7 +4721,7 @@ async function requireStrongholdOwner(
   strongholdId: string,
 ): Promise<Response | { actor: string }> {
   const session = await requireSession(request, env);
-  if (session instanceof Response) return apiError(401, "AUTH_REQUIRED");
+  if (session instanceof Response) return session;
   const stronghold = env.STRONGHOLD_DO.getByName(strongholdId);
   const [config, member] = await Promise.all([stronghold.getConfig(), stronghold.getMember(session.actor)]);
   if (!config) return apiError(404, "NOT_FOUND");

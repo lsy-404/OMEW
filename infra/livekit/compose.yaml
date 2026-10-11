@@ -4,7 +4,7 @@ services:
     command: ["--config", "/etc/livekit/livekit.yaml"]
     network_mode: host
     environment:
-      LIVEKIT_KEYS: "${LIVEKIT_API_KEY:?set LIVEKIT_API_KEY}:${LIVEKIT_API_SECRET:?set LIVEKIT_API_SECRET}"
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY:?set LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET:?set LIVEKIT_API_SECRET}"
     volumes:
       - ./livekit.yaml:/etc/livekit/livekit.yaml:ro
     restart: unless-stopped

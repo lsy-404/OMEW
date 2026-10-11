@@ -240,6 +240,10 @@ describe("server_owner/server_admin permission-gate overlay in a stronghold they
     const stub = env.STRONGHOLD_DO.getByName(id);
     await stub.addMember(member, "member");
     const adminToken = await sessionToken(admin, "admin");
+    const { ws } = await connectRoom(`${id}/ch/lobby`,member,"member");
+    ws.send(itemCreateFrame("c1","hello from member"));
+    const ack = await nextMessage(ws) as {seq:number};
+    ws.close();
 
     // Every base-setting field, including owner-only visibility, succeeds despite
     // no membership row at all.
@@ -329,11 +333,6 @@ describe("server_owner/server_admin permission-gate overlay in a stronghold they
     })).status).toBe(204);
 
     // moderate (retract) another member's message.
-    const { ws } = await connectRoom(`${id}/ch/lobby`, member, "member");
-    ws.send(itemCreateFrame("c1", "hello from member"));
-    const ack = (await nextMessage(ws)) as { seq: number };
-    ws.close();
-
     const delRes = await apiRequest(`/api/stronghold/${id}/rooms/lobby/items/${ack.seq}`, {
       method: "DELETE",
       headers: { Authorization: `Bearer ${adminToken}` },

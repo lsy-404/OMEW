@@ -1,5 +1,5 @@
-import { computed, onBeforeUnmount, ref, type Ref } from 'vue'
-import { Room, RoomEvent, Track, type Participant, type RemoteTrack } from 'livekit-client'
+import { computed, onBeforeUnmount, ref, watch, type Ref } from 'vue'
+import { ConnectionError, Room, RoomEvent, Track, type Participant, type RemoteTrack } from 'livekit-client'
 import { ApiRequestError, api } from '../api'
 import { useAuth } from './useAuth'
 
@@ -20,6 +20,7 @@ export function useVoice(audioRoot: Ref<HTMLElement | null>) {
   const state = ref<VoiceState>('idle')
   const canPublish = ref(false)
   const microphoneEnabled = ref(false)
+  const audioBlocked = ref(false)
   const participants = ref<Array<{ identity: string; name: string; speaking: boolean }>>([])
   const error = ref('')
   let activeRoom: Room | null = null
@@ -60,6 +61,7 @@ export function useVoice(audioRoot: Ref<HTMLElement | null>) {
       .on(RoomEvent.ActiveSpeakersChanged, updateParticipants)
       .on(RoomEvent.TrackSubscribed, (track) => attachAudio(track))
       .on(RoomEvent.TrackUnsubscribed, (track) => detachAudio(track))
+      .on(RoomEvent.AudioPlaybackStatusChanged, () => { audioBlocked.value = !room.canPlaybackAudio })
       .on(RoomEvent.Reconnecting, () => { state.value = 'reconnecting' })
       .on(RoomEvent.Reconnected, () => { state.value = 'connected'; refreshParticipants(room) })
       .on(RoomEvent.Disconnected, () => { void cleanup(room, false, '语音连接已断开') })
@@ -73,6 +75,7 @@ export function useVoice(audioRoot: Ref<HTMLElement | null>) {
       state.value = 'idle'
       canPublish.value = false
       microphoneEnabled.value = false
+      audioBlocked.value = false
       participants.value = []
     }
     room.removeAllListeners()
@@ -89,7 +92,7 @@ export function useVoice(audioRoot: Ref<HTMLElement | null>) {
     if (!token || activeRoom || state.value === 'connecting') return
     state.value = 'connecting'
     error.value = ''
-    const room = new Room({ adaptiveStream: false, dynacast: false })
+    const room = new Room({ adaptiveStream: false, dynacast: false, singlePeerConnection: false })
     const thisOperation = ++operationId
     activeRoom = room
     bindEvents(room)
@@ -98,13 +101,13 @@ export function useVoice(audioRoot: Ref<HTMLElement | null>) {
       const credentials = await api.mintVoiceToken(token, strongholdId, roomId, options.origin)
       if (activeRoom !== room || operationId !== thisOperation) return
       canPublish.value = credentials.can_publish
-      await room.connect(credentials.url, credentials.token)
+      await room.connect(credentials.url, credentials.token, { rtcConfig: { bundlePolicy: 'max-bundle', rtcpMuxPolicy: 'require', iceCandidatePoolSize: 0 } })
       if (activeRoom !== room || operationId !== thisOperation) return
       state.value = 'connected'
       refreshParticipants(room)
       await audioUnlock
-      if (credentials.can_publish) await setMicrophone(true)
     } catch (cause) {
+      console.warn(JSON.stringify({ event: 'voice.connection_failed', reason: cause instanceof ConnectionError ? cause.reasonName : cause instanceof Error ? cause.name : 'unknown', message: cause instanceof Error ? cause.message.replace(/(?:wss?|https?):\/\/\S+/g, '<endpoint>').slice(0, 300) : 'unknown' }))
       if (activeRoom === room) {
         await cleanup(room, true)
         error.value = joinError(cause)
@@ -134,12 +137,22 @@ export function useVoice(audioRoot: Ref<HTMLElement | null>) {
     await setMicrophone(!microphoneEnabled.value)
   }
 
+  async function resumeAudio() {
+    try {
+      await activeRoom?.startAudio()
+      audioBlocked.value = activeRoom ? !activeRoom.canPlaybackAudio : false
+    } catch {
+      error.value = '请再次点击开启声音，允许浏览器播放语音'
+    }
+  }
+
   async function leave() {
     error.value = ''
     await cleanup(activeRoom, true)
   }
 
   onBeforeUnmount(() => { void leave() })
+  watch(() => auth.user.value?.actor, () => { void leave() })
 
-  return { state, connected, canPublish, microphoneEnabled, participants, error, join, leave, toggleMicrophone }
+  return { state, connected, canPublish, microphoneEnabled, audioBlocked, participants, error, join, leave, toggleMicrophone, resumeAudio }
 }

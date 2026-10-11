@@ -132,9 +132,9 @@ export async function localProfile(
     actor,
     display_name: row.display_name.normalize("NFC"),
     created_at: row.created_at,
-    status: row.status,
+    status: row.status === "active" ? "active" : "deactivated",
   };
-  if (row.avatar) fields.avatar = row.avatar;
+  if (row.avatar) fields.avatar = row.avatar.normalize("NFC");
   if (row.bio) fields.bio = row.bio.normalize("NFC");
   const ownershipMeta = await env.DB.prepare(
     "SELECT ownership_entry FROM federation_local_profile WHERE actor=?",
@@ -218,4 +218,60 @@ export async function upsertGuestProfile(
       now,
     )
     .run();
+}
+
+export async function receiveSideloads(
+  env: Env,
+  users: unknown,
+): Promise<void> {
+  if (!Array.isArray(users) || users.length > 100) return;
+  for (const user of users) {
+    if (
+      !object(user) ||
+      !canonicalActor(user.actor) ||
+      !Number.isSafeInteger(user.profile_version) ||
+      Number(user.profile_version) < 0 ||
+      typeof user.display_name !== "string" ||
+      user.display_name.length > 256
+    )
+      continue;
+    const current = await env.DB.prepare(
+      "SELECT profile_version FROM remote_users WHERE actor=?",
+    )
+      .bind(user.actor)
+      .first<{ profile_version: number }>();
+    if (current && current.profile_version >= Number(user.profile_version))
+      continue;
+    try {
+      if (user.ownership_key)
+        await pinOwnership(
+          env,
+          user.actor,
+          user.ownership_key,
+          user.key_history,
+        );
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          level: "warn",
+          event: "ownership.chain_rejected",
+          actor: user.actor,
+          error: String(error),
+        }),
+      );
+      continue;
+    }
+    await env.DB.prepare(
+      "INSERT INTO remote_users(actor,profile_version,display_name,avatar,ownership_key_json,updated_at) VALUES (?,?,?,?,?,?) ON CONFLICT(actor) DO UPDATE SET profile_version=excluded.profile_version,display_name=excluded.display_name,avatar=excluded.avatar,ownership_key_json=COALESCE(excluded.ownership_key_json,remote_users.ownership_key_json),updated_at=excluded.updated_at WHERE excluded.profile_version>remote_users.profile_version",
+    )
+      .bind(
+        user.actor,
+        user.profile_version,
+        user.display_name,
+        typeof user.avatar === "string" ? user.avatar : null,
+        user.ownership_key ? JSON.stringify(user.ownership_key) : null,
+        Date.now(),
+      )
+      .run();
+  }
 }

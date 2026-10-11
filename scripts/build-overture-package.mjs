@@ -172,7 +172,7 @@ const manifest = {
     module: "worker/index.js",
     assetsManifest: "assets-manifest.json",
     assetsDir: "assets",
-    assetsRouting: { notFoundHandling: "single-page-application", runWorkerFirst: ["/api/*", "/federation/*", "/stronghold", "/stronghold/*", "/inbox", "/inbox/*", "/media/*"] },
+    assetsRouting: { notFoundHandling: "single-page-application", runWorkerFirst: ["/api/*", "/federation/*", "/stronghold", "/stronghold/*", "/inbox", "/inbox/*", "/media/*", "/.well-known/openmew/*", "/migration/*", "/rooms/*"] },
     compatibilityDate: "2026-08-21",
     compatibilityFlags: ["nodejs_compat", "global_fetch_strictly_public"],
     durableObjects: [{ binding: "ROOM_DO", className: "RoomDO", storage: "sqlite" }, { binding: "STRONGHOLD_DO", className: "StrongholdDO", storage: "sqlite" }],
@@ -263,7 +263,7 @@ const manifest = {
       help: { en: "Optional label used on the OMEW login button.", "zh-CN": "登录按钮上显示的可选名称。" },
     },
   ],
-  capabilities: ["d1", "r2", "secrets", "worker", "assets", "domains"],
+  capabilities: ["d1", "r2", "secrets", "worker", "assets", "domains", "cron"],
   hostSecrets: [
     { name: "CF_ACCOUNT_ID", source: "accountId", requirement: "required", reason: { en: "Keep the instance connected to its own Cloudflare account for administration.", "zh-CN": "让实例持续连接到所属 Cloudflare 账户，用于实例管理。" } },
     {

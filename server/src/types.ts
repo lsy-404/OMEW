@@ -21,7 +21,7 @@ export function instanceDomain(env: Env, requestHostname?: string): string {
 // parameter without mutating a deployment's bindings or global environment.
 export function withRequestInstanceDomain(env: Env, requestHostname: string): Env {
   if (env.INSTANCE_DOMAIN) return env;
-  return Object.assign(Object.create(env), {
+  return Object.assign({}, env, {
     INSTANCE_DOMAIN: instanceDomain(env, requestHostname),
   }) as Env;
 }
@@ -45,6 +45,8 @@ export function typeToKind(type: RoomType): RoomKind {
 
 // m0-protocol S9 / S7.3: room-scoped WS token claims.
 export interface RoomTokenClaims {
+  iat?: number;
+  guest_session_jti?: string;
   v: 1;
   typ: "room";
   actor: string;
@@ -57,6 +59,8 @@ export interface RoomTokenClaims {
 
 // m0-protocol S7.3: stronghold-scoped WS token claims (tips channel), grants no write access.
 export interface StrongholdTokenClaims {
+  iat?: number;
+  guest_session_jti?: string;
   v: 1;
   typ: "stronghold";
   actor: string;

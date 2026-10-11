@@ -1,12 +1,24 @@
 import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
 import { defineConfig } from "vitest/config";
+import { fileURLToPath } from "node:url";
 
 export default defineConfig({
+  resolve: {
+    alias: {
+      vue: fileURLToPath(
+        new URL(
+          "./web/node_modules/vue/dist/vue.runtime.esm-bundler.js",
+          import.meta.url,
+        ),
+      ),
+    },
+  },
   test: {
     include: ["test/**/*.test.ts"],
   },
   plugins: [
     cloudflareTest({
+      remoteBindings: false,
       wrangler: { configPath: "./server/wrangler.jsonc" },
       miniflare: {
         bindings: {

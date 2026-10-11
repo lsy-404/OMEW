@@ -46,9 +46,9 @@ export function useStrongholdMembers() {
   )
 
   const myRole = computed(() => {
-    const username = auth.user.value?.username
-    if (!username) return null
-    return members.value.find((member) => member.username === username)?.role ?? null
+    const actor = auth.user.value?.actor
+    if (!actor) return null
+    return members.value.find((member) => member.actor === actor)?.role ?? null
   })
 
   return { members, loading, loadError, myRole, loadMembers }

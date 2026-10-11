@@ -91,6 +91,7 @@ export async function deploy(ctx) {
   await ctx.step("worker", "running");
   const { versionId } = await ctx.worker.uploadVersion({ assets });
   await ctx.worker.switchTraffic(versionId);
+  await ctx.cron.set(["*/5 * * * *"]);
   await ctx.step("worker", "success");
 
   if (domain) await ctx.domains.attach(domain);

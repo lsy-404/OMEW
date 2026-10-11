@@ -172,7 +172,7 @@ describe("POST /api/stronghold/:id/join", () => {
     expect(secondBody).toMatchObject({ actor: joiner, role: "member" });
   });
 
-  it("returns JOIN_REQUIRES_APPLICATION for a private stronghold", async () => {
+  it("holds a private stronghold application until an administrator approves it", async () => {
     const owner = "@joinowner2:local";
     const joiner = "@joiner2:local";
     const id = `joinpriv${Date.now()}`;
@@ -183,8 +183,15 @@ describe("POST /api/stronghold/:id/join", () => {
       method: "POST",
       headers: { Authorization: `Bearer ${joinerToken}` },
     });
-    expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ error: "JOIN_REQUIRES_APPLICATION" });
+    expect(res.status).toBe(202);
+    expect(await res.json()).toEqual({state:"pending"});
+    const rooms=await apiRequest(`/api/stronghold/${id}/rooms`,{headers:{Authorization:`Bearer ${joinerToken}`}});
+    expect(rooms.status).toBe(403);
+    const ownerToken=await sessionToken(owner);
+    const approval=await apiRequest(`/api/stronghold/${id}/join-requests/${encodeURIComponent(joiner)}`,{method:"PATCH",headers:{Authorization:`Bearer ${ownerToken}`},body:JSON.stringify({state:"approved"})});
+    expect(approval.status).toBe(200);
+    const allowed=await apiRequest(`/api/stronghold/${id}/rooms`,{headers:{Authorization:`Bearer ${joinerToken}`}});
+    expect(allowed.status).toBe(200);
   });
 });
 
@@ -241,8 +248,8 @@ describe("GET /api/me/strongholds", () => {
     const mine = list.find((s) => s.id === config.id);
     expect(mine).toBeTruthy();
     expect(mine!.name).toBe("Mine");
-    expect(mine!.rooms).toContainEqual({ id: "lobby", name: "大厅", type: "channel", description: null });
-    expect(mine!.rooms).toContainEqual({ id: "posts", name: "帖子", type: "section", description: null });
+    expect(mine!.rooms).toContainEqual({ id: "lobby", name: "大厅", type: "channel", description: null, capabilities:["text","reactions"] });
+    expect(mine!.rooms).toContainEqual({ id: "posts", name: "帖子", type: "section", description: null, capabilities:["text","reactions"] });
     expect(list.find((s) => s.name === "Not Mine")).toBeUndefined();
   });
 

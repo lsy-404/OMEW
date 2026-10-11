@@ -51,6 +51,12 @@ describe("LiveKit voice token route", () => {
     expect(payload.sub).toBe(actor);
     expect(payload.video).toMatchObject({ room: expect.any(String), roomJoin: true, canPublish: true, canSubscribe: true });
     expect(room?.capabilities_json).toContain("voice");
+    const communities = await apiRequest("/api/me/strongholds",{headers:{Authorization:`Bearer ${token}`}});
+    expect(await communities.json()).toEqual(expect.arrayContaining([
+      expect.objectContaining({id,rooms:expect.arrayContaining([
+        expect.objectContaining({id:"general",capabilities:expect.arrayContaining(["text","voice"])}),
+      ])}),
+    ]));
   });
 
   it("keeps denied members listen-only and blocks visitors without room membership", async () => {
@@ -119,15 +125,14 @@ describe("LiveKit voice revocation queue", () => {
     const actor = "@revoked:local";
     const room = await liveKitRoomName(env, roomRef);
     const attemptStartedAt = Math.floor(Date.now() / 1000);
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ code: "unavailable", msg: "temporarily unavailable" }), {
-        status: 503,
-        headers: { "content-type": "application/json" },
-      }))
-      .mockResolvedValueOnce(new Response("{}", {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }));
+    let targetAttempts=0;
+    const fetchMock = vi.fn().mockImplementation(async (_input,init) => {
+      const payload=JSON.parse(String(init?.body)) as {identity?:string};
+      const fail=payload.identity===actor && targetAttempts++===0;
+      return new Response(fail?JSON.stringify({code:"unavailable",msg:"temporarily unavailable"}):"{}",{
+        status:fail?503:200,headers:{"content-type":"application/json"},
+      });
+    });
     vi.stubGlobal("fetch", fetchMock);
     try {
       await revokeVoiceParticipant(env, roomRef, actor);
@@ -136,7 +141,7 @@ describe("LiveKit voice revocation queue", () => {
       ).bind(roomRef, actor).first<{ job_key: string; revoke_token_ts: number; attempts: number; next_attempt_at: number }>();
       expect(pending).not.toBeNull();
       expect(pending?.attempts).toBe(1);
-      expect(pending?.revoke_token_ts).toBeGreaterThanOrEqual(Math.floor(Date.now() / 1000));
+      expect(pending?.revoke_token_ts).toBeGreaterThanOrEqual(attemptStartedAt+1);
       expect(pending?.next_attempt_at).toBeGreaterThanOrEqual(attemptStartedAt + 1);
 
       await env.DB.prepare("UPDATE voice_revocations SET next_attempt_at = 0 WHERE job_key = ?")
@@ -145,9 +150,10 @@ describe("LiveKit voice revocation queue", () => {
 
       expect(await env.DB.prepare("SELECT job_key FROM voice_revocations WHERE job_key = ?")
         .bind(pending!.job_key).first()).toBeNull();
-      expect(fetchMock).toHaveBeenCalledTimes(2);
-      const firstPayload = JSON.parse(String(fetchMock.mock.calls[0][1]?.body)) as { room: string; identity: string };
-      const retryPayload = JSON.parse(String(fetchMock.mock.calls[1][1]?.body)) as { revoke_token_ts?: string; revokeTokenTs?: string };
+      const calls=fetchMock.mock.calls.map(call=>JSON.parse(String(call[1]?.body))).filter(payload=>payload.identity===actor);
+      expect(calls).toHaveLength(2);
+      const firstPayload = calls[0] as { room: string; identity: string };
+      const retryPayload = calls[1] as { revoke_token_ts?: string; revokeTokenTs?: string };
       expect(BigInt(retryPayload.revoke_token_ts ?? retryPayload.revokeTokenTs!)).toBe(BigInt(pending!.revoke_token_ts));
       expect(firstPayload).toMatchObject({ room, identity: actor });
     } finally {

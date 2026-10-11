@@ -3,9 +3,9 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { apiRequest, ensureMigrated, registerUser } from "./helpers";
 
 // Real user system (registration gate, invite codes, owner bootstrap, login,
-// federation trust list) replacing the M1 dev-token stub. Instance policy
+// credentials) replacing the M1 dev-token stub. Instance policy
 // (allow_root / root_requirements / trusted_identity_servers) is env config as
-// of task 035 - see server/src/config.ts - so these tests set env vars directly
+// configured in server/src/config.ts, so these tests set env vars directly
 // instead of writing the old instance_config D1 table.
 
 const OWNERSHIP = { ownership_pubkey: "test-pubkey", ownership_ciphertext: "test-ciphertext-blob" };
@@ -13,11 +13,9 @@ const OWNERSHIP = { ownership_pubkey: "test-pubkey", ownership_ciphertext: "test
 function setInstanceEnv(overrides: {
   allow_root?: boolean;
   root_requirements?: string[];
-  trusted_identity_servers?: string[];
 }): void {
   if (overrides.allow_root !== undefined) env.ALLOW_ROOT = overrides.allow_root ? "1" : "0";
   if (overrides.root_requirements) env.ROOT_REQUIREMENTS = overrides.root_requirements.join(",");
-  if (overrides.trusted_identity_servers) env.TRUSTED_IDENTITY_SERVERS = overrides.trusted_identity_servers.join(",");
 }
 
 // Registers a fresh user and force-grants server_role=admin via D1, independent
@@ -172,36 +170,6 @@ describe("login", () => {
     const body = (await res.json()) as Record<string, unknown>;
     expect(body.token).toBeTypeOf("string");
     expect((body.user as Record<string, unknown>).username).toBe(username);
-  });
-});
-
-describe("federation session trust list", () => {
-  it("rejects an iss domain not on the trusted list", async () => {
-    setInstanceEnv({ trusted_identity_servers: ["allowed.example"] });
-    const res = await apiRequest("/federation/session", {
-      method: "POST",
-      body: JSON.stringify({ iss: "untrusted.example" }),
-    });
-    expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ error: "ORIGIN_NOT_TRUSTED" });
-  });
-
-  it("accepts an exact match and falls through to the M6 placeholder", async () => {
-    setInstanceEnv({ trusted_identity_servers: ["allowed.example"] });
-    const res = await apiRequest("/federation/session", {
-      method: "POST",
-      body: JSON.stringify({ iss: "allowed.example" }),
-    });
-    expect(res.status).toBe(501);
-  });
-
-  it("accepts any origin when the trusted list is a wildcard", async () => {
-    setInstanceEnv({ trusted_identity_servers: ["*"] });
-    const res = await apiRequest("/federation/session", {
-      method: "POST",
-      body: JSON.stringify({ iss: "anything.example" }),
-    });
-    expect(res.status).toBe(501);
   });
 });
 

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import JoinRequests from './JoinRequests.vue'
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { api } from '../api'
 import type { BanEntry, FeatureRestrictions, MemberPatch, MemberTab, RestrictedFeature, StrongholdConfigPatch, StrongholdMember } from '../api/types'
@@ -82,7 +83,7 @@ function onMemberSubtabSelect(item: { value: 'all' | 'restricted' }) {
 }
 
 function isSelf(member: StrongholdMember) {
-  return member.username === auth.user.value?.username
+  return member.actor === auth.user.value?.actor
 }
 
 // ---- members / banned list ----
@@ -304,7 +305,7 @@ async function saveSettings() {
     // behind the rail and the tab title, and the config behind the home card
     // and the edit/retract affordances. Neither refetches on its own.
     await Promise.all([loadStrongholds(true), reloadStrongholdConfig()])
-    settingsSaveOk.value = true
+      settingsSaveOk.value = true
   } catch {
     settingsError.value = '保存失败，请稍后重试'
   } finally {
@@ -375,6 +376,7 @@ watch(
 
           <div class="admin-modal__scroll">
             <div v-if="panelTab === 'members' || panelTab === 'banned'" class="admin-modal__body">
+              <JoinRequests v-if="canManage && panelTab === 'members'" :stronghold-id="selectedNodeId" />
               <WinSelectorBar
                 v-if="panelTab === 'members'"
                 class="member-subtabs"
