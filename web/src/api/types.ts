@@ -314,6 +314,7 @@ export interface RoomSummary {
   name: string
   type: RoomType
   description: string | null
+  capabilities: string[]
   post_count?: number
 }
 
@@ -322,6 +323,7 @@ export interface RoomPatch {
   description?: string | null
   position?: number
   restricted?: boolean
+  capabilities?: string[]
 }
 
 export interface StrongholdSummary {
@@ -355,6 +357,7 @@ export interface CreateStrongholdPayload {
 export interface CreateRoomPayload {
   name: string
   type: RoomType
+  capabilities?: string[]
 }
 
 // ---- room items (chat messages / posts / replies) -------------------------
@@ -405,6 +408,14 @@ export interface RoomTokenResponse {
   token: string
   room: string
   exp: number
+}
+
+export interface VoiceTokenResponse {
+  token: string
+  url: string
+  room: string
+  exp: number
+  can_publish: boolean
 }
 
 export interface EditRetractResult {

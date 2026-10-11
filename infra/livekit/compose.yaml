@@ -1,0 +1,10 @@
+services:
+  livekit:
+    image: livekit/livekit-server:v1.13.9
+    command: ["--config", "/etc/livekit/livekit.yaml"]
+    network_mode: host
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY:?set LIVEKIT_API_KEY}:${LIVEKIT_API_SECRET:?set LIVEKIT_API_SECRET}"
+    volumes:
+      - ./livekit.yaml:/etc/livekit/livekit.yaml:ro
+    restart: unless-stopped

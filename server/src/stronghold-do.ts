@@ -43,6 +43,13 @@ export type RoomRow = {
   created_at: number;
 };
 
+function normalizeRoomCapabilities(capabilities: string[], type: RoomType): string[] {
+  const supported = capabilities.filter((capability) =>
+    ["text", "attachments", "reactions"].includes(capability) || (capability === "voice" && type === "channel")
+  );
+  return [...new Set(["text", ...supported, "reactions"])];
+}
+
 // URL short-name derivation, shared by direct creation and
 // application approval. Lowercase, non [a-z0-9] folds to '-', collapses runs,
 // trims edges, caps at 32 - an all-non-ASCII name collapses to empty, which
@@ -519,8 +526,7 @@ export class StrongholdDO extends DurableObject<Env> {
   ): Promise<RoomRow> {
     // m0-protocol §13.3: "text" is mandatory on every room; "reactions" (§3.2a) is
     // served for every room too, so it's forced into the registry the same way.
-    const withText = capabilities.includes("text") ? capabilities : ["text", ...capabilities];
-    const caps = withText.includes("reactions") ? withText : [...withText, "reactions"];
+    const caps = normalizeRoomCapabilities(capabilities, type);
     const createdAt = Date.now();
     // listRooms orders by position first, so a room without one would sort ahead
     // of every explicitly ordered room - append it to the end instead.
@@ -592,7 +598,7 @@ export class StrongholdDO extends DurableObject<Env> {
       description: "description" in patch ? (patch.description ?? null) : current.description,
       restricted: patch.restricted != null ? (patch.restricted ? 1 : 0) : current.restricted,
       position: patch.position ?? current.position,
-      capabilities_json: patch.capabilities ? JSON.stringify(patch.capabilities) : current.capabilities_json,
+      capabilities_json: patch.capabilities ? JSON.stringify(normalizeRoomCapabilities(patch.capabilities, current.type)) : current.capabilities_json,
     };
     this.ctx.storage.sql.exec(
       "UPDATE room SET name = ?, description = ?, capabilities_json = ?, restricted = ?, position = ? WHERE res_id = ?",

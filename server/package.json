@@ -13,7 +13,9 @@
     "db:migrate:local": "wrangler d1 migrations apply openmew --local",
     "db:migrate:remote": "wrangler d1 migrations apply openmew --remote"
   },
-  "dependencies": {},
+  "dependencies": {
+    "livekit-server-sdk": "^2.19.1"
+  },
   "devDependencies": {
     "@types/node": "^26.2.0",
     "typescript": "^5.9.2",

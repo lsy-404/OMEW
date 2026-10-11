@@ -23,6 +23,7 @@ import AppIcon from './icons/AppIcon.vue'
 import ItemContextMenu from './ItemContextMenu.vue'
 import ImageEditor from './ImageEditor.vue'
 import MessageBubble, { type MessageVM } from './MessageBubble.vue'
+import VoicePanel from './VoicePanel.vue'
 
 const auth = useAuth()
 const { packs } = useEmotes()
@@ -57,6 +58,7 @@ const chatInput = ref<HTMLTextAreaElement | null>(null)
 const imageQueue = ref<File[]>([])
 const editingImage = ref<File | null>(null)
 const canParticipate = computed(() => auth.isAuthenticated.value && !isReadOnly.value)
+const voiceEnabled = computed(() => selectedChannel.value?.capabilities.includes('voice') ?? false)
 const emotesEnabled = computed(() => instanceConfig.value?.emotes_enabled !== false)
 const reactionsEnabled = computed(() => instanceConfig.value?.reactions_enabled !== false)
 const artAssetsEnabled = computed(() => instanceConfig.value?.art_assets_enabled !== false)
@@ -330,6 +332,12 @@ watch(() => selectedChannel.value?.id, pin, { flush: 'post' })
         </div>
       </template>
     </form>
+    <VoicePanel
+      v-if="voiceEnabled && canParticipate && selectedChannel && selectedNodeId"
+      :stronghold-id="selectedNodeId"
+      :room-id="selectedChannel.id"
+      :room-name="selectedChannel.name"
+    />
     <div ref="scrollEl" class="chat-pane__messages">
       <div v-if="hasMoreHistory" class="chat-pane__load-more">
         <WinButton Style="SubtleButtonStyle" :IsEnabled="!historyLoading" @click="onLoadOlder">

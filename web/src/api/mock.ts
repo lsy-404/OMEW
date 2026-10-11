@@ -46,6 +46,7 @@ import type {
   RoomPatch,
   RoomSummary,
   RoomTokenResponse,
+  VoiceTokenResponse,
   RoomType,
   ServerGroup,
   ServerGroupCreatePayload,
@@ -284,6 +285,7 @@ interface MockRoomState {
   type: RoomType
   name: string
   description: string | null
+  capabilities: string[]
   position: number
   restricted: boolean
   items: RoomItem[] // seq ascending
@@ -440,6 +442,7 @@ function makeRoom(resId: string, type: RoomType, name: string, position = 0, des
     type,
     name,
     description,
+    capabilities: ["text", "reactions"],
     position,
     restricted: false,
     items: [],
@@ -448,6 +451,13 @@ function makeRoom(resId: string, type: RoomType, name: string, position = 0, des
     nextSeq: 1,
     reactions: new Map(),
   }
+}
+
+function roomCapabilities(capabilities: string[], type: RoomType): string[] {
+  const known = capabilities.filter((capability) =>
+    ['text', 'attachments', 'reactions'].includes(capability) || (capability === 'voice' && type === 'channel'),
+  )
+  return [...new Set(['text', ...known, 'reactions'])]
 }
 
 // m0-protocol §3.2a: absolute per-name counts plus the requester's own
@@ -620,7 +630,7 @@ function roomPostCount(room: MockRoomState): number | undefined {
 
 function toRoomSummary(r: MockRoomState): RoomSummary {
   const post_count = roomPostCount(r)
-  return { id: r.res_id, name: r.name, type: r.type, description: r.description, ...(post_count !== undefined ? { post_count } : {}) }
+  return { id: r.res_id, name: r.name, type: r.type, description: r.description, capabilities: r.capabilities, ...(post_count !== undefined ? { post_count } : {}) }
 }
 
 function toStrongholdSummary(state: MockStrongholdState): StrongholdSummary {
@@ -1264,6 +1274,7 @@ export const mockApi = {
     if (!state) throw new ApiRequestError('NOT_FOUND', 404)
     const resId = `room-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
     const room = makeRoom(resId, payload.type, payload.name)
+    room.capabilities = roomCapabilities(payload.capabilities ?? [], payload.type)
     state.rooms.set(resId, room)
     return delay(toRoomSummary(room))
   },
@@ -1290,6 +1301,7 @@ export const mockApi = {
     }
     if (patch.position !== undefined) room.position = patch.position
     if (patch.restricted !== undefined) room.restricted = patch.restricted
+    if (patch.capabilities !== undefined) room.capabilities = roomCapabilities(patch.capabilities, room.type)
     return delay(toRoomSummary(room))
   },
 
@@ -1351,6 +1363,14 @@ export const mockApi = {
     requireUser(token)
     requireRoom(nodeId, resId)
     return delay({ token: `mock-room-token-${resId}`, room: `${nodeId}/mock/${resId}`, exp: Math.floor(Date.now() / 1000) + 300 })
+  },
+
+  async mintVoiceToken(token: string, nodeId: string, resId: string, _origin?: string): Promise<VoiceTokenResponse> {
+    const user = requireUser(token)
+    if (!user.is_admin && !findMember(nodeId, user.actor)) throw new ApiRequestError('FORBIDDEN', 403)
+    const room = requireRoom(nodeId, resId)
+    if (room.type !== 'channel' || !room.capabilities.includes('voice')) throw new ApiRequestError('NOT_FOUND', 404)
+    throw new ApiRequestError('VOICE_UNAVAILABLE', 503)
   },
 
   async getRoomHistory(token: string | null, nodeId: string, resId: string, before?: number | null, limit = 50): Promise<{

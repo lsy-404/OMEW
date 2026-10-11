@@ -29,6 +29,8 @@ interface Env {
   USE_ART_ASSETS?: string;
   CF_API_TOKEN?: string;
   CF_ACCOUNT_ID?: string;
+  LIVEKIT_API_KEY?: string;
+  LIVEKIT_API_SECRET?: string;
 }
 
 declare namespace Cloudflare {
@@ -57,5 +59,7 @@ declare namespace Cloudflare {
     USE_ART_ASSETS?: string;
     CF_API_TOKEN?: string;
     CF_ACCOUNT_ID?: string;
+    LIVEKIT_API_KEY?: string;
+    LIVEKIT_API_SECRET?: string;
   }
 }

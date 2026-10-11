@@ -37,6 +37,7 @@ import type {
   RoomPatch,
   RoomSummary,
   RoomTokenResponse,
+  VoiceTokenResponse,
   ServerGroup,
   ServerGroupCreatePayload,
   ServerGroupPatch,
@@ -482,6 +483,12 @@ export const realApi = {
 
   mintRoomToken: (token: string, nodeId: string, resId: string) =>
     request<RoomTokenResponse>(`/stronghold/${nodeId}/rooms/${resId}/token`, {
+      method: 'POST',
+      headers: authHeaders(token),
+    }),
+
+  mintVoiceToken: (token: string, nodeId: string, resId: string, origin?: string) =>
+    request<VoiceTokenResponse>(`${origin ?? API_BASE}/stronghold/${nodeId}/rooms/${resId}/voice-token`, {
       method: 'POST',
       headers: authHeaders(token),
     }),

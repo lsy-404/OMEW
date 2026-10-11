@@ -16,6 +16,7 @@ import { federationRoutes } from "./federation-routes";
 import { failure as protocolFailure, ProtocolError } from "./federation-codec";
 import { consumeDeadLetters, consumeFederationQueue, runFederationMaintenance, validGuestSession, type Delivery } from "./federation";
 import { ftsQuery, searchableText } from "./archive";
+import { createVoiceAccessToken, revokeVoiceParticipantFromStronghold, revokeVoiceRoomParticipants, VoiceUnavailableError } from "./voice";
 import {
   beginOidcAuthorization,
   clearOidcTransactionCookie,
@@ -37,6 +38,7 @@ import { deriveSlugBase, featurePaused, fetchServerGroupsForLocalpart, type Conf
 import { generateTotpSecret, totpOtpauthUrl, verifyTotpCode } from "./totp";
 import {
   HOME_DOMAIN,
+  DENY_CHANNEL_SPEAK,
   instanceDomain,
   typeToKind,
   withRequestInstanceDomain,
@@ -799,7 +801,10 @@ async function broadcastGroupRevoke(env: Env, localparts: string[]): Promise<voi
         await Promise.all(
           results.map((row) => {
             const stub = env.STRONGHOLD_DO.getByName(row.stronghold_id);
-            return stub.revokeActor(actor).catch(() => {});
+            return Promise.all([
+              stub.revokeActor(actor).catch(() => {}),
+              revokeVoiceParticipantFromStronghold(env, row.stronghold_id, actor).catch(() => {}),
+            ]).then(() => {});
           })
         );
       } catch {
@@ -1875,7 +1880,10 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     // membership-index row, so enumerate the global stronghold slug index.
     const { results } = await env.DB.prepare("SELECT DISTINCT stronghold_id FROM stronghold_slug_index")
       .all<{ stronghold_id: string }>();
-    await Promise.all(results.map((row) => env.STRONGHOLD_DO.getByName(row.stronghold_id).revokeServerRole(targetActor).catch(() => {})));
+    await Promise.all(results.map((row) => Promise.all([
+      env.STRONGHOLD_DO.getByName(row.stronghold_id).revokeServerRole(targetActor).catch(() => {}),
+      revokeVoiceParticipantFromStronghold(env, row.stronghold_id, targetActor).catch(() => {}),
+    ])));
     return json({ actor: targetActor, operator: gate.actor, banned_at: bannedAt, expires_at: expiresAt });
   }
 
@@ -1899,12 +1907,15 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
       .bind(body.server_role, userRoleMatch.localpart!)
       .run();
     if (result.meta.changes === 0) return apiError(404, "NOT_FOUND");
-    if (previous.server_role === "admin" && body.server_role === "user") {
+    if (previous.server_role !== body.server_role) {
       const actor = `@${userRoleMatch.localpart}:${instanceDomain(env)}`;
       const { results } = await env.DB.prepare("SELECT DISTINCT stronghold_id FROM stronghold_member_index")
         .all<{ stronghold_id: string }>();
       await Promise.all(
-        results.map((row) => env.STRONGHOLD_DO.getByName(row.stronghold_id).revokeServerRole(actor))
+        results.map((row) => Promise.all([
+          env.STRONGHOLD_DO.getByName(row.stronghold_id).revokeServerRole(actor),
+          revokeVoiceParticipantFromStronghold(env, row.stronghold_id, actor),
+        ]))
       );
     }
     return json({ localpart: userRoleMatch.localpart, server_role: body.server_role });
@@ -2605,7 +2616,8 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     const type: RoomType = body.type === "section" ? "section" : "channel";
 
     const resId = generateResId();
-    const room = await stub.createRoom(resId, type, name, ["text"], false);
+    const capabilities = Array.isArray(body.capabilities) ? body.capabilities.map(String) : ["text"];
+    const room = await stub.createRoom(resId, type, name, capabilities, false);
     return json(toApiRoom(room), 201);
   }
   // The only other room listing under the /api/* flat-shape surface is
@@ -2638,7 +2650,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     if (!eff || (eff.role !== "owner" && eff.role !== "mod")) return apiError(403, "FORBIDDEN");
     const body = await readJsonBody(request);
     if (!body) return apiError(413, "PAYLOAD_INVALID");
-    const patch: { name?: string; description?: string | null; restricted?: boolean; position?: number } = {};
+    const patch: { name?: string; description?: string | null; restricted?: boolean; position?: number; capabilities?: string[] } = {};
     if ("name" in body) {
       const name = typeof body.name === "string" ? body.name.trim() : "";
       if (!name) return apiError(400, "MALFORMED");
@@ -2657,7 +2669,18 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
       if (typeof body.position !== "number") return apiError(400, "MALFORMED");
       patch.position = body.position;
     }
+    if ("capabilities" in body) {
+      if (!Array.isArray(body.capabilities) || body.capabilities.some((capability) => typeof capability !== "string")) return apiError(400, "MALFORMED");
+      patch.capabilities = body.capabilities as string[];
+    }
     const stub = env.STRONGHOLD_DO.getByName(m.id!);
+    const currentRoom = await stub.getRoom(m.resId!);
+    if (!currentRoom) return apiError(404, "NOT_FOUND");
+    const hadVoice = currentRoom.type === "channel" && JSON.parse(currentRoom.capabilities_json).includes("voice");
+    const removesVoice = patch.capabilities !== undefined && !patch.capabilities.includes("voice");
+    if (hadVoice && (removesVoice || (patch.restricted === true && currentRoom.restricted === 0))) {
+      await revokeVoiceRoomParticipants(env, `${m.id!}/ch/${m.resId!}`);
+    }
     const updated = await stub.updateRoom(m.resId!, patch);
     if (!updated) return apiError(404, "NOT_FOUND");
     return json(toApiRoom(updated));
@@ -2673,6 +2696,9 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     const rooms = await stub.listRooms();
     const sameType = rooms.filter((r) => r.type === room.type);
     if (sameType.length <= 1) return apiError(409, "LAST_ROOM_OF_TYPE");
+    if (room.type === "channel" && JSON.parse(room.capabilities_json).includes("voice")) {
+      await revokeVoiceRoomParticipants(env, `${m.id!}/ch/${m.resId!}`);
+    }
     await stub.deleteRoom(m.resId!);
     return new Response(null, { status: 204, headers: cors() });
   }
@@ -2709,6 +2735,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     const member = await stub.getMember(actor);
     if (!member) return apiError(404, "NOT_FOUND");
     if (member.role === "owner") return apiError(400, "OWNER_MUST_TRANSFER");
+    await revokeVoiceParticipantFromStronghold(env, m.id!, actor);
     await stub.removeMember(actor);
     return new Response(null, { status: 204, headers: cors() });
   }
@@ -2908,6 +2935,9 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     // StrongholdDO intact, so a retry is safe and cannot strand inaccessible
     // room state behind an already-deleted config.
     const rooms = await stub.listRoomsForDeletion();
+    await Promise.all(rooms
+      .filter((room) => room.type === "channel" && JSON.parse(room.capabilities_json).includes("voice"))
+      .map((room) => revokeVoiceRoomParticipants(env, `${strongholdId}/ch/${room.res_id}`)));
     const archivePrefix = `${strongholdId}/`;
     const { results: archiveRows } = await env.DB.prepare(
       "SELECT DISTINCT scoped.r2_key FROM archive_index scoped " +
@@ -3013,6 +3043,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
       if (deny !== 0 && target.role === "mod") return apiError(400, "DENY_ON_MOD");
     }
 
+    if (role !== undefined || deny !== undefined) await revokeVoiceParticipantFromStronghold(env, m.id!, m.actor!);
     const updated = await stub.updateMember(m.actor!, { role, deny });
     if (!updated) return apiError(404, "NOT_FOUND");
     const profiles = await actorProfiles(env, [updated.actor]);
@@ -3030,6 +3061,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     if (target.role === "owner") return apiError(403, "FORBIDDEN");
     if (target.role === "mod" && eff.role !== "owner") return apiError(403, "FORBIDDEN");
 
+    await revokeVoiceParticipantFromStronghold(env, m.id!, m.actor!);
     await stub.removeMember(m.actor!);
     return new Response(null, { status: 204, headers: cors() });
   }
@@ -3062,6 +3094,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     if (!body) return apiError(413, "PAYLOAD_INVALID");
     const expiresAt = readBanExpiry(body);
     if (expiresAt === "invalid") return apiError(400, "EXPIRY_INVALID");
+    await revokeVoiceParticipantFromStronghold(env, m.id!, m.actor!);
     const banned = await stub.banMember(m.actor!, session.actor, expiresAt);
     if (!banned) return apiError(404, "NOT_FOUND");
     return json({ actor: banned.actor, operator: session.actor, banned_at: banned.banned_at, expires_at: banned.expires_at });
@@ -3261,6 +3294,31 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
   }
 
   // ---- WS token minting (m0-protocol S7.3 / S9) ------------------------------------
+
+  m = match("/stronghold/:id/rooms/:resId/voice-token", path);
+  if (m && method === "POST") {
+    const session = await requireSession(request, env);
+    if (session instanceof Response) return session;
+    const stronghold = env.STRONGHOLD_DO.getByName(m.id!);
+    if (!await stronghold.getConfig()) return errorResponse(404, "OMEW_NOT_FOUND", "stronghold not found");
+    const eff = await effectiveRole(env, m.id!, session.server_role, session.actor);
+    if (!eff) return errorResponse(403, "OMEW_BANNED", "not a member or banned");
+    const room = await stronghold.getRoom(m.resId!);
+    if (!room || room.archived || room.type !== "channel" || !JSON.parse(room.capabilities_json).includes("voice")) {
+      return errorResponse(404, "OMEW_ROOM_NOT_FOUND", "voice room not found");
+    }
+    if (!canAccessRestrictedRoom(eff.role, room)) {
+      return errorResponse(404, "OMEW_ROOM_NOT_FOUND", "voice room not found");
+    }
+    const canPublish = eff.role !== "member" || (eff.deny & DENY_CHANNEL_SPEAK) === 0;
+    const displayName = (await actorProfiles(env, [session.actor])).get(session.actor)?.display_name ?? localpartOfActor(session.actor);
+    try {
+      return json(await createVoiceAccessToken(env, `${m.id!}/ch/${m.resId!}`, session.actor, displayName, canPublish));
+    } catch (error) {
+      if (error instanceof VoiceUnavailableError) return errorResponse(503, "OMEW_VOICE_UNAVAILABLE", "voice service is not configured");
+      throw error;
+    }
+  }
 
   m = match("/stronghold/:id/rooms/:resId/token", path);
   if (m && method === "POST") {
