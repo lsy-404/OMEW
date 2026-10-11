@@ -15,6 +15,7 @@ import { getInstanceBranding, getInstanceConfig, getSsoConfig, isValidOidcIssuer
 import { federationRoutes } from "./federation-routes";
 import { failure as protocolFailure, ProtocolError } from "./federation-codec";
 import { consumeDeadLetters, consumeFederationQueue, runFederationMaintenance, validGuestSession, type Delivery } from "./federation";
+import { ftsQuery, searchableText } from "./archive";
 import {
   beginOidcAuthorization,
   clearOidcTransactionCookie,
@@ -2914,13 +2915,27 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
         "AND NOT EXISTS (SELECT 1 FROM archive_index other WHERE other.r2_key = scoped.r2_key " +
         "AND NOT (other.do_key = ? OR instr(other.do_key, ?) = 1))"
     ).bind(strongholdId, archivePrefix, strongholdId, archivePrefix).all<{ r2_key: string }>();
+    const { results: backupRows } = await env.DB.prepare(
+      "SELECT r2_key FROM room_backup WHERE do_key = ? OR instr(do_key, ?) = 1"
+    ).bind(strongholdId, archivePrefix).all<{ r2_key: string }>();
+    const { results: searchRows } = await env.DB.prepare(
+      "SELECT rowid, do_key, seq, text, actor, ts, kind, root_seq FROM archive_document WHERE do_key = ? OR instr(do_key, ?) = 1"
+    ).bind(strongholdId, archivePrefix).all<{
+      rowid: number; do_key: string; seq: string; text: string; actor: string; ts: string; kind: string; root_seq: string;
+    }>();
     await Promise.all(
       rooms.map((room) => env.ROOM_DO.getByName(`${strongholdId}/${typeToKind(room.type)}/${room.res_id}`).purgeForStrongholdDeletion())
     );
 
     // A failed archive deletion keeps the config and indexes intact so the
     // owner can retry; child RoomDO deletion is idempotent.
-    await Promise.all([...new Set(archiveRows.map((row) => row.r2_key))].map((key) => env.MEDIA.delete(key)));
+    await Promise.all([...new Set([...archiveRows, ...backupRows].map((row) => row.r2_key))].map((key) => env.MEDIA.delete(key)));
+    for (let offset = 0; offset < searchRows.length; offset += 50) {
+      const statements = searchRows.slice(offset, offset + 50).map((row) => env.DB.prepare(
+        "INSERT INTO archive_search(archive_search, rowid, do_key, seq, text, actor, ts, kind, root_seq) VALUES ('delete', ?, ?, ?, ?, ?, ?, ?, ?)"
+      ).bind(row.rowid, row.do_key, row.seq, row.text, row.actor, row.ts, row.kind, row.root_seq));
+      if (statements.length) await env.DB.batch(statements);
+    }
 
     // D1 is only an index/auxiliary state for this graph.  These deletes are
     // deliberately scoped by the stronghold id; media is not touched because
@@ -2931,6 +2946,8 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
       env.DB.prepare("DELETE FROM stronghold_directory_index WHERE stronghold_id = ?").bind(strongholdId),
       env.DB.prepare("DELETE FROM guest_member_state WHERE stronghold_id = ?").bind(strongholdId),
       env.DB.prepare("DELETE FROM archive_index WHERE do_key = ? OR instr(do_key, ?) = 1").bind(strongholdId, `${strongholdId}/`),
+      env.DB.prepare("DELETE FROM archive_document WHERE do_key = ? OR instr(do_key, ?) = 1").bind(strongholdId, `${strongholdId}/`),
+      env.DB.prepare("DELETE FROM room_backup WHERE do_key = ? OR instr(do_key, ?) = 1").bind(strongholdId, `${strongholdId}/`),
     ]);
     await stub.purgeForStrongholdDeletion();
     return new Response(null, { status: 204, headers: cors() });
@@ -3312,6 +3329,121 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
 
   // ---- history proxy (S5.3: seq-anchored pagination) -------------------------------
 
+  m = match("/api/stronghold/:id/rooms/:resId/backups", path);
+  if (m && method === "GET") {
+    const owner = await requireStrongholdOwner(request, env, m.id!);
+    if (owner instanceof Response) return owner;
+    const room = await env.STRONGHOLD_DO.getByName(m.id!).getRoom(m.resId!);
+    if (!room) return apiError(404, "ROOM_NOT_FOUND");
+    const doKey = `${m.id!}/${typeToKind(room.type)}/${m.resId!}`;
+    const backups = await env.DB.prepare(
+      "SELECT id AS backup_id, created_at, byte_length AS bytes, sha256 FROM room_backup WHERE do_key = ? ORDER BY created_at DESC LIMIT 100"
+    ).bind(doKey).all<{ backup_id: string; created_at: number; bytes: number; sha256: string }>();
+    return json({ backups: backups.results });
+  }
+
+  if (m && method === "POST") {
+    const owner = await requireStrongholdOwner(request, env, m.id!);
+    if (owner instanceof Response) return owner;
+    const strongholdStub = env.STRONGHOLD_DO.getByName(m.id!);
+    const room = await strongholdStub.getRoom(m.resId!);
+    if (!room) return apiError(404, "ROOM_NOT_FOUND");
+    const doKey = `${m.id!}/${typeToKind(room.type)}/${m.resId!}`;
+    const backupId = crypto.randomUUID();
+    const snapshot = await env.ROOM_DO.getByName(doKey).exportSnapshot(backupId, doKey);
+    await env.DB.prepare(
+      "INSERT INTO room_backup (id, do_key, owner_actor, r2_key, created_at, sha256, byte_length) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    ).bind(backupId, doKey, owner.actor, snapshot.r2_key, Date.now(), snapshot.sha256, snapshot.bytes).run();
+    return json({ backup_id: backupId, room: doKey, created_at: Date.now(), bytes: snapshot.bytes, sha256: snapshot.sha256 });
+  }
+
+  m = match("/api/stronghold/:id/rooms/:resId/backups/:backupId", path);
+  if (m && method === "GET") {
+    const owner = await requireStrongholdOwner(request, env, m.id!);
+    if (owner instanceof Response) return owner;
+    const strongholdStub = env.STRONGHOLD_DO.getByName(m.id!);
+    const room = await strongholdStub.getRoom(m.resId!);
+    if (!room) return apiError(404, "ROOM_NOT_FOUND");
+    const doKey = `${m.id!}/${typeToKind(room.type)}/${m.resId!}`;
+    const backup = await env.DB.prepare(
+      "SELECT r2_key, byte_length FROM room_backup WHERE id = ? AND do_key = ?"
+    ).bind(m.backupId!, doKey).first<{ r2_key: string; byte_length: number }>();
+    if (!backup) return apiError(404, "BACKUP_NOT_FOUND");
+    const object = await env.MEDIA.get(backup.r2_key);
+    if (!object?.body) return apiError(404, "BACKUP_NOT_FOUND");
+    return new Response(object.body, {
+      headers: {
+        "Content-Type": "application/gzip",
+        "Content-Length": String(backup.byte_length),
+        "Content-Disposition": `attachment; filename="omew-room-${m.resId!}-${m.backupId!}.ndjson.gz"`,
+        "Cache-Control": "private, no-store",
+      },
+    });
+  }
+
+  m = match("/api/stronghold/:id/rooms/:resId/restore", path);
+  if (m && method === "POST") {
+    const owner = await requireStrongholdOwner(request, env, m.id!);
+    if (owner instanceof Response) return owner;
+    const body = await request.json().catch(() => null) as { backup_id?: unknown } | null;
+    if (!body || typeof body.backup_id !== "string") return apiError(400, "MALFORMED");
+    const strongholdStub = env.STRONGHOLD_DO.getByName(m.id!);
+    const room = await strongholdStub.getRoom(m.resId!);
+    if (!room) return apiError(404, "ROOM_NOT_FOUND");
+    const doKey = `${m.id!}/${typeToKind(room.type)}/${m.resId!}`;
+    const backup = await env.DB.prepare(
+      "SELECT r2_key, sha256 FROM room_backup WHERE id = ? AND do_key = ?"
+    ).bind(body.backup_id, doKey).first<{ r2_key: string; sha256: string }>();
+    if (!backup) return apiError(404, "BACKUP_NOT_FOUND");
+    try {
+      const restored_rows = await env.ROOM_DO.getByName(doKey).restoreSnapshot(body.backup_id, backup.r2_key, doKey, backup.sha256);
+      return json({ restored_rows, room: doKey });
+    } catch (error) {
+      const message = String(error);
+      if (message.includes("contains data")) return apiError(409, "RESTORE_TARGET_NOT_EMPTY");
+      if (message.includes("identity mismatch")) return apiError(409, "RESTORE_ROOM_MISMATCH");
+      if (message.includes("snapshot")) return apiError(400, "BACKUP_INVALID");
+      throw error;
+    }
+  }
+
+  m = match("/api/stronghold/:id/rooms/:resId/search", path);
+  if (m && method === "GET") {
+    const gate = await resolveGuestOrMember(request, env, m.id!);
+    if (gate instanceof Response) return gate;
+    const strongholdStub = env.STRONGHOLD_DO.getByName(m.id!);
+    const room = await strongholdStub.getRoom(m.resId!);
+    if (!room || roomBlockedForGate(gate, room)) return apiError(404, "NOT_FOUND");
+    const query = (url.searchParams.get("q") ?? "").trim();
+    if (!query || query.length > 200) return apiError(400, "SEARCH_QUERY_INVALID");
+    const fts = ftsQuery(query);
+    if (!fts) return json({ items: [] });
+    const roomRef = `${m.id!}/${typeToKind(room.type)}/${m.resId!}`;
+    const archived = await env.DB.prepare(
+      "SELECT seq, text, actor, ts, kind, root_seq FROM archive_search WHERE archive_search MATCH ? AND do_key = ? " +
+      "ORDER BY CAST(ts AS INTEGER) DESC, CAST(seq AS INTEGER) DESC LIMIT 100"
+    ).bind(fts, roomRef).all<{ seq: string; text: string; actor: string; ts: string; kind: string; root_seq: string }>();
+    const roomStub = env.ROOM_DO.getByName(roomRef);
+    const visibleArchived = await roomStub.applyArchiveSearchOverlays(
+      archived.results.map((row) => ({ ...row, seq: Number(row.seq), ts: Number(row.ts), root_seq: row.root_seq ? Number(row.root_seq) : 0 })), query
+    );
+    const hot = await roomStub.searchRecent(query, 100, gate.kind === "member" ? gate.actor : null) as Array<{
+      seq: number; actor: string; ts: number; kind: string; root_seq: number | null; body: unknown;
+    }>;
+    const itemsBySeq = new Map<number, { seq: number; root_seq: number; actor: string; ts: number; kind: string; text: string }>();
+    for (const row of visibleArchived) {
+      itemsBySeq.set(row.seq, { seq: row.seq, root_seq: Number(row.root_seq) || row.seq, actor: row.actor, ts: Number(row.ts), kind: row.kind, text: row.text });
+    }
+    for (const row of hot) {
+      itemsBySeq.set(row.seq, {
+        seq: row.seq, root_seq: row.root_seq ?? row.seq, actor: row.actor, ts: row.ts, kind: row.kind,
+        text: searchableText(JSON.stringify(row.body)),
+      });
+    }
+    const items = [...itemsBySeq.values()].sort((a, b) => b.ts - a.ts || b.seq - a.seq).slice(0, 100);
+    return json({ items });
+  }
+
   m = match("/stronghold/:id/rooms/:resId/history", path);
   if (m && method === "GET") {
     // This route predates the flat {error:CODE} /api/* surface and
@@ -3358,8 +3490,8 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     const before = url.searchParams.has("before") ? Number(url.searchParams.get("before")) : null;
     const limit = url.searchParams.has("limit") ? Number(url.searchParams.get("limit")) : 50;
     const roomStub = env.ROOM_DO.getByName(roomRef);
-    const items = await roomStub.getHistory(before, limit, requester);
-    return json({ items });
+    const page = await roomStub.getHistory(before, limit, requester);
+    return json(page);
   }
 
   // ---- section posts -------------------------------------------------------------
@@ -4194,6 +4326,21 @@ async function requireRole(request: Request, env: Env, strongholdId: string, rol
   if (!eff) return errorResponse(403, "OMEW_BANNED", "not a member or banned");
   if (!roles.includes(eff.role)) return errorResponse(403, "OMEW_FORBIDDEN", "insufficient role");
   return { actor: session.actor, role: eff.role };
+}
+
+async function requireStrongholdOwner(
+  request: Request,
+  env: Env,
+  strongholdId: string,
+): Promise<Response | { actor: string }> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return apiError(401, "AUTH_REQUIRED");
+  const stronghold = env.STRONGHOLD_DO.getByName(strongholdId);
+  const [config, member] = await Promise.all([stronghold.getConfig(), stronghold.getMember(session.actor)]);
+  if (!config) return apiError(404, "NOT_FOUND");
+  const actualOwner = config.owner_actor === session.actor && member?.role === "owner" && !member.banned_at;
+  if (!actualOwner && session.server_role !== "owner") return apiError(403, "FORBIDDEN");
+  return { actor: session.actor };
 }
 
 // ---- guest read gate (m0-protocol §8.2) -------------------------------

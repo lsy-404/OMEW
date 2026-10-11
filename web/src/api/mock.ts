@@ -1353,18 +1353,50 @@ export const mockApi = {
     return delay({ token: `mock-room-token-${resId}`, room: `${nodeId}/mock/${resId}`, exp: Math.floor(Date.now() / 1000) + 300 })
   },
 
-  async getRoomHistory(token: string | null, nodeId: string, resId: string, before?: number | null, limit = 50): Promise<RoomItem[]> {
+  async getRoomHistory(token: string | null, nodeId: string, resId: string, before?: number | null, limit = 50): Promise<{
+    items: RoomItem[]; next_before: number | null; has_more: boolean;
+  }> {
     const requester = requireUserOrGuest(token, nodeId)
     const room = requireRoom(nodeId, resId)
     const requesterActor = requester?.actor ?? null
-    const visible = room.items.filter((i) => !room.tombstoned.has(i.seq))
-    const filtered = before == null ? visible : visible.filter((i) => i.seq < before)
-    return delay(
-      filtered
-        .slice(-limit)
-        .reverse()
-        .map((item) => ({ ...item, reactions: reactionsFor(room, item.seq, requesterActor) })),
-    )
+    const candidates = room.items
+      .filter((item) => before == null || item.seq < before)
+      .sort((a, b) => b.seq - a.seq)
+    const page: RoomItem[] = []
+    let hasMore = false
+    for (const item of candidates) {
+      if (room.tombstoned.has(item.seq)) continue
+      if (page.length === limit) {
+        hasMore = true
+        break
+      }
+      page.push(item)
+    }
+    const nextBefore = hasMore && page.length ? page[page.length - 1]!.seq : null
+    return delay({
+      items: page.map((item) => ({ ...item, reactions: reactionsFor(room, item.seq, requesterActor) })),
+      next_before: hasMore ? nextBefore : null,
+      has_more: hasMore,
+    })
+  },
+
+  async searchRoomHistory(token: string | null, nodeId: string, resId: string, query: string): Promise<{
+    seq: number; root_seq: number; actor: string; ts: number; kind: string; text: string;
+  }[]> {
+    requireUserOrGuest(token, nodeId)
+    const room = requireRoom(nodeId, resId)
+    const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean)
+    if (!terms.length) return delay([])
+    return delay(room.items
+      .filter((item) => !room.tombstoned.has(item.seq))
+      .map((item) => {
+        const body = item.body as Record<string, unknown>
+        const text = [body.title, body.text, body.preview].filter((value): value is string => typeof value === 'string').join('\n')
+        return { seq: item.seq, root_seq: item.root_seq ?? item.seq, actor: item.actor, ts: item.ts, kind: item.kind, text }
+      })
+      .filter((item) => terms.every((term) => item.text.toLocaleLowerCase().includes(term)))
+      .sort((a, b) => b.ts - a.ts || b.seq - a.seq)
+      .slice(0, 100))
   },
 
   async editItem(token: string, nodeId: string, resId: string, seq: number, content: unknown): Promise<EditRetractResult> {

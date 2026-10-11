@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
+import { api } from '../api'
 import { DEFAULT_NODE_PAGE_BG, EMPTY_STATE } from '../assets/mew'
 import { useAuth } from '../composables/useAuth'
 import { useAuthModal } from '../composables/useAuthModal'
@@ -8,6 +9,7 @@ import { useSection } from '../composables/useSection'
 import { useSectionRoom } from '../composables/useSectionRoom'
 import { useStronghold } from '../composables/useStronghold'
 import { useStrongholdConfig } from '../composables/useStrongholdConfig'
+import { usePostModal } from '../composables/usePostModal'
 import { WinButton } from '../vendor/winui'
 import ComposePostModal from './ComposePostModal.vue'
 import EmptyState from './EmptyState.vue'
@@ -15,14 +17,21 @@ import PostCard from './PostCard.vue'
 
 const auth = useAuth()
 const { openAuthModal } = useAuthModal()
-const { isReadOnly } = useStronghold()
+const { isReadOnly, selectedNodeId } = useStronghold()
 const { posts, postsLoading, hasMorePosts, loadMorePosts, postRoom, toggleReaction } = useSectionRoom()
 const { sectionRooms, selectedSection, selectSection } = useSection()
 const { currentNode } = useStronghold()
 const { config } = useStrongholdConfig()
 const { config: instanceConfig } = useInstanceConfig()
+const { open: openPost } = usePostModal()
 
 const showCompose = ref(false)
+const searchOpen = ref(false)
+const searchQuery = ref('')
+const searchSubmitted = ref(false)
+const searchLoading = ref(false)
+const searchError = ref('')
+const searchResults = ref<Awaited<ReturnType<typeof api.searchRoomHistory>>>([])
 const canParticipate = computed(() => auth.isAuthenticated.value && !isReadOnly.value)
 const artAssetsEnabled = computed(() => instanceConfig.value?.art_assets_enabled !== false)
 
@@ -38,6 +47,43 @@ function openCompose() {
 function closeCompose() {
   showCompose.value = false
 }
+
+async function searchPosts() {
+  const query = searchQuery.value.trim()
+  const section = selectedSection.value
+  if (!query || !section || !selectedNodeId.value) return
+  searchSubmitted.value = true
+  searchLoading.value = true
+  searchError.value = ''
+  try {
+    searchResults.value = await api.searchRoomHistory(auth.token.value, selectedNodeId.value, section.id, query)
+  } catch {
+    searchError.value = '搜索失败，请稍后重试'
+    searchResults.value = []
+  } finally {
+    searchLoading.value = false
+  }
+}
+
+function toggleSearch() {
+  searchOpen.value = !searchOpen.value
+  searchError.value = ''
+  if (!searchOpen.value) {
+    searchQuery.value = ''
+    searchResults.value = []
+    searchSubmitted.value = false
+  }
+}
+
+watch([selectedNodeId, selectedSection], () => {
+  searchResults.value = []
+  searchError.value = ''
+  searchSubmitted.value = false
+})
+
+watch(searchQuery, () => {
+  searchSubmitted.value = false
+})
 
 function onSectionKeydown(event: KeyboardEvent, index: number) {
   if (!sectionRooms.value.length) return
@@ -102,6 +148,17 @@ function onSectionKeydown(event: KeyboardEvent, index: number) {
         </div>
         <div class="left-column__toolbar-action">
           <WinButton
+            v-if="postRoom"
+            Style="DefaultButtonStyle"
+            class="left-column__search-toggle"
+            :aria-expanded="searchOpen"
+            aria-label="搜索当前话题组"
+            title="搜索当前话题组"
+            @click="toggleSearch"
+          >
+            <span aria-hidden="true">⌕</span>
+          </WinButton>
+          <WinButton
             v-if="postRoom && canParticipate"
             Style="AccentButtonStyle"
             class="left-column__compose-btn"
@@ -118,6 +175,26 @@ function onSectionKeydown(event: KeyboardEvent, index: number) {
     </div>
 
     <ComposePostModal :open="showCompose" @close="closeCompose" />
+
+    <form v-if="searchOpen" class="left-column__search" role="search" @submit.prevent="searchPosts">
+      <input v-model="searchQuery" type="search" maxlength="200" placeholder="搜索当前话题组" aria-label="搜索帖子内容" />
+      <WinButton Style="AccentButtonStyle" :IsEnabled="!!searchQuery.trim() && !searchLoading" type="submit">
+        {{ searchLoading ? '搜索中…' : '搜索' }}
+      </WinButton>
+      <p v-if="searchError" class="left-column__search-state" role="alert">{{ searchError }}</p>
+      <p v-else-if="!searchLoading && searchSubmitted && searchResults.length === 0" class="left-column__search-state">没有找到匹配内容</p>
+      <button
+        v-for="item in searchResults"
+        :key="item.seq"
+        type="button"
+        class="left-column__search-result"
+        @click="openPost(item.root_seq || item.seq, item.seq)"
+      >
+        <span>{{ item.text }}</span>
+        <small>{{ new Date(item.ts).toLocaleString() }}</small>
+      </button>
+      <p v-if="!searchLoading && searchResults.length" class="left-column__search-state">找到 {{ searchResults.length }} 条</p>
+    </form>
 
     <div class="left-column__feed">
       <PostCard
@@ -226,6 +303,14 @@ function onSectionKeydown(event: KeyboardEvent, index: number) {
   display: flex;
   align-items: center;
 }
+
+.left-column__search-toggle { width: 2rem; min-width: 2rem; padding-inline: 0; }
+.left-column__search { display: flex; flex: 0 0 auto; flex-direction: column; gap: .45rem; padding: .6rem .75rem; border-bottom: 1px solid var(--stroke-divider); background: var(--layer-default); }
+.left-column__search input { min-width: 0; padding: .48rem .6rem; border: 1px solid var(--control-stroke); border-radius: var(--radius-sm); background: var(--control-fill); color: var(--text-primary); font: inherit; }
+.left-column__search-state { margin: 0; color: var(--text-tertiary); font-size: .72rem; }
+.left-column__search-result { display: flex; flex-direction: column; gap: .25rem; max-height: 7rem; overflow: hidden; padding: .5rem; border: 1px solid var(--card-stroke); border-radius: var(--radius-sm); background: var(--card-bg); color: var(--text-primary); text-align: left; cursor: pointer; }
+.left-column__search-result span { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; font-size: .76rem; line-height: 1.4; }
+.left-column__search-result small { color: var(--text-tertiary); font-size: .67rem; }
 
 .left-column__compose-btn {
   white-space: nowrap;

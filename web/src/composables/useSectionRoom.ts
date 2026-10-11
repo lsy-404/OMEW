@@ -367,7 +367,7 @@ export function useSectionRoom() {
     return ok
   }
 
-  async function openThread(postSeq: number) {
+  async function openThread(postSeq: number, targetReplySeq: number | null = null) {
     const auth = useAuth()
     const nodeId = selectedNodeId.value
     const room = postRoom.value
@@ -376,7 +376,11 @@ export function useSectionRoom() {
     threadLoading.value = true
     thread.value = null
     try {
-      const result = await api.getPost(auth.token.value, nodeId, room.id, postSeq, null, REPLIES_PAGE_SIZE)
+      let result = await api.getPost(auth.token.value, nodeId, room.id, postSeq, null, REPLIES_PAGE_SIZE)
+      while (targetReplySeq != null && !result.replies.some((reply) => reply.seq === targetReplySeq) && result.next_before != null) {
+        const older = await api.getPost(auth.token.value, nodeId, room.id, postSeq, result.next_before, REPLIES_PAGE_SIZE)
+        result = { post: result.post, replies: [...result.replies, ...older.replies], next_before: older.next_before }
+      }
       if (openPostSeq !== postSeq) return // superseded
       thread.value = result
       threadHasMore.value = result.next_before != null

@@ -1,9 +1,23 @@
 import { DurableObject } from "cloudflare:workers";
+import { createHash } from "node:crypto";
 import { verifyToken } from "./auth";
 import { newEvent, queueDelivery } from "./federation";
 import { Envelope, JsonObject, ProtocolError, object } from "./federation-codec";
 import { getInstanceBranding } from "./config";
 import { markdownPreview } from "./markdown-preview";
+import {
+  ARCHIVE_ALARM_MS,
+  ARCHIVE_SHARD_ITEMS,
+  HOT_AGE_MS,
+  HOT_ITEM_LIMIT,
+  archiveObjectKey,
+  gzipJsonLines,
+  putArchiveStream,
+  readGzipJsonLines,
+  readGzipRecordsUntil,
+  searchableText,
+  type ArchiveItem,
+} from "./archive";
 import { featurePaused, type EditConfigSnapshot, type FeatureRestrictionSnapshot, type MemberRevokePayload } from "./stronghold-do";
 import {
   DENY_CHANNEL_SPEAK,
@@ -94,7 +108,13 @@ export class RoomDO extends DurableObject<Env> {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    ctx.blockConcurrencyWhile(async () => this.migrate());
+    ctx.blockConcurrencyWhile(async () => {
+      this.migrate();
+      const content = ctx.storage.sql.exec<{ n: number }>(
+        "SELECT (SELECT COUNT(*) FROM item) + (SELECT COUNT(*) FROM archive_search_pending) AS n"
+      ).one().n;
+      if (content > 0 && !(await ctx.storage.getAlarm())) await ctx.storage.setAlarm(Date.now() + ARCHIVE_ALARM_MS);
+    });
   }
 
   // A StrongholdDO cannot delete a RoomDO's SQLite/KV namespace from the
@@ -153,10 +173,394 @@ export class RoomDO extends DurableObject<Env> {
       -- primary key already leads with target_seq, so a standalone index on just
       -- that column is a redundant left-prefix - write cost with no read benefit.
       DROP INDEX IF EXISTS idx_reaction_target;
+      CREATE TABLE IF NOT EXISTS room_backup_snapshot (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        backup_id TEXT NOT NULL,
+        table_name TEXT NOT NULL,
+        row_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_room_backup_snapshot ON room_backup_snapshot(backup_id, seq);
+      CREATE TABLE IF NOT EXISTS room_restore_stage (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        backup_id TEXT NOT NULL,
+        table_name TEXT NOT NULL,
+        row_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_room_restore_stage ON room_restore_stage(backup_id, table_name, seq);
+      CREATE TABLE IF NOT EXISTS archive_search_pending (target_seq INTEGER PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS archive_batch_snapshot (
+        row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        batch_id TEXT NOT NULL,
+        record_type TEXT NOT NULL,
+        row_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_archive_batch_snapshot ON archive_batch_snapshot(batch_id, row_id);
     `);
     // 标签功能已移除；旧帖子标签索引不再保留。
     sql.exec("DROP TABLE IF EXISTS post_topic;");
     sql.exec(`INSERT OR IGNORE INTO meta (key, value) VALUES ('next_seq', 1)`);
+  }
+
+  async alarm(): Promise<void> {
+    const repairedSearch = await this.repairArchiveSearch();
+    const indexedPosts = await this.indexOldSectionPosts();
+    const archived = await this.archiveDueItems();
+    await this.ctx.storage.setAlarm(Date.now() + (
+      archived > 0 || indexedPosts >= 1_000 || repairedSearch >= 100 ? 1_000 : ARCHIVE_ALARM_MS
+    ));
+  }
+
+  async archiveNow(): Promise<number> {
+    return this.archiveBatch(true);
+  }
+
+  async reconcileArchiveSearch(): Promise<void> {
+    await this.repairArchiveSearch();
+  }
+
+  async exportSnapshot(backupId: string, doKey: string): Promise<{ r2_key: string; sha256: string; bytes: number }> {
+    if (!/^[0-9a-f-]{36}$/i.test(backupId)) throw new Error("invalid backup id");
+    const roomRef = this.ctx.storage.sql.exec<{ value: string }>(
+      "SELECT value FROM meta WHERE key = 'room_ref'"
+    ).toArray()[0]?.value;
+    if (roomRef && roomRef !== doKey) throw new Error("room identity mismatch");
+    if (!roomRef) {
+      this.ctx.storage.sql.exec(
+        "INSERT INTO meta (key, value) VALUES ('room_ref', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        doKey
+      );
+    }
+    const tables = this.snapshotTableNames();
+    const sql = this.ctx.storage.sql;
+    sql.exec("DELETE FROM room_backup_snapshot WHERE backup_id = ?", backupId);
+    this.ctx.storage.transactionSync(() => {
+      for (const table of tables) {
+        const columns = sql.exec(`SELECT * FROM ${table} LIMIT 0`).columnNames;
+        const jsonArgs = columns.map((column) => `\'${column}\', \"${column}\"`).join(", ");
+        sql.exec(
+          `INSERT INTO room_backup_snapshot (backup_id, table_name, row_json) SELECT ?, ?, json_object(${jsonArgs}) FROM ${table}`,
+          backupId, table
+        );
+      }
+    });
+    const snapshotKey = `backups/${encodeURIComponent(doKey)}/${backupId}.ndjson.gz`;
+    const stagedRows: { seq: number; table_name: string; row_json: string }[] = [];
+    let lastSeq = 0;
+    const header = JSON.stringify({ type: "snapshot", schema: 1, room_ref: doKey, tables, created_at: Date.now() });
+    let headerPending = true;
+    const compressed = gzipJsonLines(async () => {
+      if (headerPending) { headerPending = false; return header; }
+      if (!stagedRows.length) {
+        const page = sql.exec<{ seq: number; table_name: string; row_json: string }>(
+          "SELECT seq, table_name, row_json FROM room_backup_snapshot WHERE backup_id = ? AND seq > ? ORDER BY seq LIMIT 100",
+          backupId, lastSeq
+        ).toArray();
+        stagedRows.push(...page);
+      }
+      const row = stagedRows.shift();
+      if (!row) return null;
+      lastSeq = row.seq;
+      return JSON.stringify({ type: "row", table: row.table_name, row: JSON.parse(row.row_json) });
+    });
+    try {
+      await putArchiveStream(this.env.MEDIA, snapshotKey, compressed.stream, doKey, 0, 0);
+      const object = await this.env.MEDIA.head(snapshotKey);
+      if (!object) throw new Error("snapshot write did not complete");
+      return { r2_key: snapshotKey, sha256: compressed.getHash(), bytes: object.size };
+    } finally {
+      sql.exec("DELETE FROM room_backup_snapshot WHERE backup_id = ?", backupId);
+    }
+  }
+
+  async restoreSnapshot(backupId: string, r2Key: string, doKey: string, expectedSha256: string): Promise<number> {
+    if (!/^[0-9a-f-]{36}$/i.test(backupId)) throw new Error("invalid backup id");
+    const currentRoomRef = this.ctx.storage.sql.exec<{ value: string }>(
+      "SELECT value FROM meta WHERE key = 'room_ref'"
+    ).toArray()[0]?.value;
+    if (currentRoomRef && currentRoomRef !== doKey) throw new Error("room identity mismatch");
+    const object = await this.env.MEDIA.get(r2Key);
+    if (!object?.body) throw new Error("snapshot not found");
+    const availableTables = new Set(this.snapshotTableNames());
+    const allowedTables = new Set([
+      "meta", "item", "tombstone", "edit", "dedupe_local", "dedupe_fed", "subscription",
+      "post_index", "reaction", "archive_search_pending", "local_event", "federation_state", "signed_event_archive",
+    ]);
+    const requiredTables = ["meta", "item", "tombstone", "edit", "dedupe_local", "dedupe_fed", "subscription", "post_index", "reaction"];
+    let snapshotTables: string[] = [];
+    let headerSeen = false;
+    let rows = 0;
+    const digest = createHash("sha256");
+    this.ctx.storage.sql.exec("DELETE FROM room_restore_stage WHERE backup_id = ?", backupId);
+    try {
+      const verifiedBody = object.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+        transform(chunk, controller) {
+          digest.update(chunk);
+          controller.enqueue(chunk);
+        },
+      }));
+      await readGzipJsonLines(verifiedBody, (record) => {
+        if (!headerSeen) {
+          const rowTables = record.tables;
+          if (record.type !== "snapshot" || record.schema !== 1 || record.room_ref !== doKey ||
+              !Array.isArray(rowTables) || !rowTables.every((name): name is string =>
+                typeof name === "string" && allowedTables.has(name) && availableTables.has(name)
+              ) || !requiredTables.every((name) => rowTables.includes(name)) ||
+              new Set(rowTables).size !== rowTables.length) {
+            throw new Error("snapshot room or schema mismatch");
+          }
+          snapshotTables = rowTables as string[];
+          headerSeen = true;
+          return;
+        }
+        if (record.type !== "row" || typeof record.table !== "string" || !allowedTables.has(record.table) ||
+            !snapshotTables.includes(record.table) ||
+            !record.row || typeof record.row !== "object" || Array.isArray(record.row)) {
+          throw new Error("invalid snapshot row");
+        }
+        this.ctx.storage.sql.exec(
+          "INSERT INTO room_restore_stage (backup_id, table_name, row_json) VALUES (?, ?, ?)",
+          backupId, record.table, JSON.stringify(record.row)
+        );
+        rows++;
+      });
+      if (!headerSeen) throw new Error("snapshot header missing");
+      if (digest.digest("hex") !== expectedSha256) throw new Error("snapshot checksum mismatch");
+      const externalArchive = await this.env.DB.prepare(
+        "SELECT 1 AS found FROM archive_index WHERE do_key = ? LIMIT 1"
+      ).bind(doKey).first();
+      if (externalArchive) throw new Error("restore target room contains data");
+      const optionalRoomTables = ["local_event", "federation_state", "signed_event_archive"]
+        .filter((table) => availableTables.has(table));
+      const optionalEmptyChecks = optionalRoomTables.map((table) => `(SELECT COUNT(*) FROM ${table}) = 0`).join(" AND ");
+      this.ctx.storage.transactionSync(() => {
+        const busy = this.ctx.storage.sql.exec<{ busy: number }>(
+          `SELECT CASE WHEN (SELECT COUNT(*) FROM item) = 0 AND (SELECT COUNT(*) FROM tombstone) = 0 AND
+           (SELECT COUNT(*) FROM edit) = 0 AND (SELECT COUNT(*) FROM dedupe_local) = 0 AND
+           (SELECT COUNT(*) FROM dedupe_fed) = 0 AND (SELECT COUNT(*) FROM post_index) = 0 AND
+           (SELECT COUNT(*) FROM reaction) = 0 AND (SELECT COUNT(*) FROM subscription) = 0 AND
+           (SELECT COUNT(*) FROM archive_search_pending) = 0 AND
+           ${optionalEmptyChecks || "1 = 1"} AND
+           (SELECT COUNT(*) FROM meta WHERE key IN ('archive_pending_start', 'archive_pending_end')) = 0 AND
+           (SELECT value FROM meta WHERE key = 'next_seq') = 1 THEN 0 ELSE 1 END AS busy`
+        ).one().busy;
+        if (busy) throw new Error("restore target room contains data");
+        for (const table of snapshotTables) {
+          const columns = this.ctx.storage.sql.exec(`SELECT * FROM ${table} LIMIT 0`).columnNames;
+          const quotedColumns = columns.map((column) => `\"${column}\"`).join(", ");
+          const values = columns.map((column) => `json_extract(row_json, '$.${column}')`).join(", ");
+          const conflict = table === "meta" ? "OR REPLACE " : "";
+          this.ctx.storage.sql.exec(
+            `INSERT ${conflict}INTO ${table} (${quotedColumns}) SELECT ${values} FROM room_restore_stage WHERE backup_id = ? AND table_name = ? ORDER BY seq`,
+            backupId, table
+          );
+        }
+      });
+      return rows;
+    } finally {
+      this.ctx.storage.sql.exec("DELETE FROM room_restore_stage WHERE backup_id = ?", backupId);
+    }
+  }
+
+  private async archiveDueItems(): Promise<number> {
+    return this.archiveBatch(false);
+  }
+
+  private async archiveBatch(force: boolean): Promise<number> {
+    const roomRef = this.ctx.storage.sql.exec<{ value: string }>(
+      "SELECT value FROM meta WHERE key = 'room_ref'"
+    ).toArray()[0]?.value;
+    const isSection = roomRef?.split("/")[1] === "sec";
+    const eligible = isSection ? "parent_seq IS NOT NULL" : "1 = 1";
+    const stats = this.ctx.storage.sql.exec<{ count: number; oldest: number | null }>(
+      `SELECT COUNT(*) AS count, MIN(ts) AS oldest FROM item WHERE ${eligible}`
+    ).one();
+    if (!stats.count || (!force && stats.count <= HOT_ITEM_LIMIT && (stats.oldest ?? Date.now()) > Date.now() - HOT_AGE_MS)) return 0;
+
+    const cutoff = Date.now() - HOT_AGE_MS;
+    const archiveFilter = !force && stats.count <= HOT_ITEM_LIMIT
+      ? `(${eligible}) AND ts <= ${cutoff}`
+      : eligible;
+    let candidates = this.ctx.storage.sql.exec<{ seq: number; ts: number }>(
+      `SELECT seq, ts FROM item WHERE ${eligible} ORDER BY seq ASC LIMIT ?`,
+      ARCHIVE_SHARD_ITEMS
+    ).toArray();
+    if (!force && stats.count <= HOT_ITEM_LIMIT) {
+      candidates = candidates.filter((row) => row.ts <= cutoff);
+    }
+    if (!candidates.length) return 0;
+
+    const start = candidates[0]!.seq;
+    const end = candidates[candidates.length - 1]!.seq;
+    const doKey = roomRef ?? "unresolved";
+    const r2Key = archiveObjectKey(doKey, start, end);
+    const batchId = crypto.randomUUID();
+    const sql = this.ctx.storage.sql;
+    const itemColumns = sql.exec("SELECT * FROM item LIMIT 0").columnNames;
+    const itemJson = itemColumns.map((column) => `\'${column}\', \"${column}\"`).join(", ");
+    const postColumns = sql.exec("SELECT * FROM post_index LIMIT 0").columnNames;
+    const postJson = postColumns.map((column) => `\'${column}\', \"${column}\"`).join(", ");
+    sql.exec("DELETE FROM archive_batch_snapshot WHERE batch_id = ?", batchId);
+    this.ctx.storage.transactionSync(() => {
+      sql.exec(
+        `INSERT INTO archive_batch_snapshot (batch_id, record_type, row_json) ` +
+        `SELECT ?, 'item', json_object(${itemJson}) FROM item WHERE ${archiveFilter} AND seq BETWEEN ? AND ? ORDER BY seq DESC`,
+        batchId, start, end
+      );
+      sql.exec(
+        `INSERT INTO archive_batch_snapshot (batch_id, record_type, row_json) ` +
+        `SELECT ?, 'post_index', json_object(${postJson}) FROM post_index WHERE post_seq BETWEEN ? AND ? ORDER BY post_seq`,
+        batchId, start, end
+      );
+    });
+    sql.exec(
+      "INSERT INTO meta (key, value) VALUES ('archive_pending_start', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      start
+    );
+    sql.exec(
+      "INSERT INTO meta (key, value) VALUES ('archive_pending_end', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      end
+    );
+    let lastRowId = 0;
+    const stagedRows: { row_id: number; record_type: string; row_json: string }[] = [];
+    const compressed = gzipJsonLines(async () => {
+      if (!stagedRows.length) {
+        stagedRows.push(...sql.exec<{ row_id: number; record_type: string; row_json: string }>(
+          "SELECT row_id, record_type, row_json FROM archive_batch_snapshot WHERE batch_id = ? AND row_id > ? ORDER BY row_id LIMIT 100",
+          batchId, lastRowId
+        ).toArray());
+      }
+      const row = stagedRows.shift();
+      if (!row) return null;
+      lastRowId = row.row_id;
+      return JSON.stringify({ type: row.record_type, row: JSON.parse(row.row_json) });
+    });
+
+    try {
+      await putArchiveStream(this.env.MEDIA, r2Key, compressed.stream, doKey, start, end);
+      const checksum = compressed.getHash();
+      let searchRowId = 0;
+      while (true) {
+        const batch = sql.exec<{ row_id: number; row_json: string }>(
+          "SELECT row_id, row_json FROM archive_batch_snapshot WHERE batch_id = ? AND record_type = 'item' AND row_id > ? ORDER BY row_id LIMIT 50",
+          batchId, searchRowId
+        ).toArray();
+        if (!batch.length) break;
+        searchRowId = batch[batch.length - 1]!.row_id;
+        const items = batch.map((entry) => JSON.parse(entry.row_json) as ArchiveItem);
+        const seqs = items.map((row) => String(row.seq));
+        const prior = await this.env.DB.prepare(
+          `SELECT rowid, do_key, seq, text, actor, ts, kind, root_seq FROM archive_document WHERE do_key = ? AND seq IN (${seqs.map(() => "?").join(",")})`
+        ).bind(doKey, ...seqs).all<{
+          rowid: number; do_key: string; seq: string; text: string; actor: string; ts: string; kind: string; root_seq: string;
+        }>();
+        const statements = prior.results.map((row) => this.env.DB.prepare(
+          "INSERT INTO archive_search(archive_search, rowid, do_key, seq, text, actor, ts, kind, root_seq) VALUES ('delete', ?, ?, ?, ?, ?, ?, ?, ?)"
+        ).bind(row.rowid, row.do_key, row.seq, row.text, row.actor, row.ts, row.kind, row.root_seq));
+        statements.push(this.env.DB.prepare(
+          `DELETE FROM archive_document WHERE do_key = ? AND seq IN (${seqs.map(() => "?").join(",")})`
+        ).bind(doKey, ...seqs));
+        await this.env.DB.batch(statements);
+
+        const searchStatements = [];
+        for (const row of items) {
+          const tombstone = sql.exec<{ seq: number }>("SELECT seq FROM tombstone WHERE seq = ?", row.seq).toArray()[0];
+          if (tombstone) continue;
+          const edit = sql.exec<{ body: string }>("SELECT body FROM edit WHERE target_seq = ?", row.seq).toArray()[0];
+          const text = searchableText(edit?.body ?? row.body);
+          searchStatements.push(
+            this.env.DB.prepare("INSERT INTO archive_document (do_key, seq, text, actor, ts, kind, root_seq) VALUES (?, ?, ?, ?, ?, ?, ?)")
+              .bind(doKey, String(row.seq), text, row.actor, String(row.ts), row.kind, row.root_seq == null ? "" : String(row.root_seq)),
+            this.env.DB.prepare(
+              "INSERT INTO archive_search(rowid, do_key, seq, text, actor, ts, kind, root_seq) " +
+              "SELECT rowid, do_key, seq, text, actor, ts, kind, root_seq FROM archive_document WHERE do_key = ? AND seq = ?"
+            ).bind(doKey, String(row.seq)),
+          );
+        }
+        if (searchStatements.length) await this.env.DB.batch(searchStatements);
+      }
+      await this.env.DB.prepare(
+        "INSERT INTO archive_index (do_key, seq_start, seq_end, r2_key, shard_version, created_at, content_sha256, item_count) " +
+        "VALUES (?, ?, ?, ?, 1, ?, ?, ?) ON CONFLICT(do_key, seq_start) DO UPDATE SET seq_end = excluded.seq_end, r2_key = excluded.r2_key, " +
+        "content_sha256 = excluded.content_sha256, item_count = excluded.item_count"
+      ).bind(doKey, start, end, r2Key, Date.now(), checksum, candidates.length).run();
+
+      sql.exec(`DELETE FROM item WHERE ${archiveFilter} AND seq BETWEEN ? AND ?`, start, end);
+      sql.exec("DELETE FROM meta WHERE key IN ('archive_pending_start', 'archive_pending_end')");
+      await this.repairArchiveSearch();
+      return candidates.length;
+    } finally {
+      sql.exec("DELETE FROM archive_batch_snapshot WHERE batch_id = ?", batchId);
+    }
+  }
+
+  private isInArchiveBatch(seq: number): boolean {
+    const bounds = this.ctx.storage.sql.exec<{ key: string; value: number }>(
+      "SELECT key, value FROM meta WHERE key IN ('archive_pending_start', 'archive_pending_end')"
+    ).toArray();
+    const values = new Map(bounds.map((row) => [row.key, row.value]));
+    const start = values.get("archive_pending_start");
+    const end = values.get("archive_pending_end");
+    return start != null && end != null && seq >= start && seq <= end;
+  }
+
+  private isSearchIndexedPost(item: ItemRow): boolean {
+    if (item.kind !== "post" || item.parent_seq != null) return false;
+    const cursor = this.ctx.storage.sql.exec<{ value: number }>(
+      "SELECT value FROM meta WHERE key = 'post_search_cursor'"
+    ).toArray()[0]?.value;
+    return cursor != null && item.seq <= cursor;
+  }
+
+  private async indexOldSectionPosts(): Promise<number> {
+    const roomRef = this.ctx.storage.sql.exec<{ value: string }>(
+      "SELECT value FROM meta WHERE key = 'room_ref'"
+    ).toArray()[0]?.value;
+    if (roomRef?.split("/")[1] !== "sec") return 0;
+    const cursor = this.ctx.storage.sql.exec<{ value: number }>(
+      "SELECT value FROM meta WHERE key = 'post_search_cursor'"
+    ).toArray()[0]?.value ?? 0;
+    const currentMax = this.ctx.storage.sql.exec<{ seq: number }>(
+      "SELECT value - 1 AS seq FROM meta WHERE key = 'next_seq'"
+    ).one().seq;
+    const posts = this.ctx.storage.sql.exec<ItemRow & {
+      edit_body: string | null; tomb_seq: number | null;
+    }>(
+      `SELECT i.*, e.body AS edit_body, t.seq AS tomb_seq FROM item i
+       LEFT JOIN edit e ON e.target_seq = i.seq LEFT JOIN tombstone t ON t.seq = i.seq
+       WHERE i.seq > ? AND i.parent_seq IS NULL AND i.kind = 'post' AND i.ts <= ? AND t.seq IS NULL
+       ORDER BY i.seq LIMIT 1000`,
+      cursor, Date.now() - HOT_AGE_MS
+    ).toArray();
+    for (let offset = 0; offset < posts.length; offset += 30) {
+      const batch = posts.slice(offset, offset + 30);
+      const seqs = batch.map((row) => String(row.seq));
+      const prior = await this.env.DB.prepare(
+        `SELECT rowid, do_key, seq, text, actor, ts, kind, root_seq FROM archive_document WHERE do_key = ? AND seq IN (${seqs.map(() => "?").join(",")})`
+      ).bind(roomRef, ...seqs).all<{
+        rowid: number; do_key: string; seq: string; text: string; actor: string; ts: string; kind: string; root_seq: string;
+      }>();
+      const statements = prior.results.map((row) => this.env.DB.prepare(
+        "INSERT INTO archive_search(archive_search, rowid, do_key, seq, text, actor, ts, kind, root_seq) VALUES ('delete', ?, ?, ?, ?, ?, ?, ?, ?)"
+      ).bind(row.rowid, row.do_key, row.seq, row.text, row.actor, row.ts, row.kind, row.root_seq));
+      for (const row of batch) {
+        statements.push(
+          this.env.DB.prepare(
+            "INSERT OR REPLACE INTO archive_document (do_key, seq, text, actor, ts, kind, root_seq) VALUES (?, ?, ?, ?, ?, ?, ?)"
+          ).bind(roomRef, String(row.seq), searchableText(row.edit_body ?? row.body), row.actor, String(row.ts), row.kind, String(row.seq)),
+          this.env.DB.prepare(
+            "INSERT INTO archive_search(rowid, do_key, seq, text, actor, ts, kind, root_seq) " +
+            "SELECT rowid, do_key, seq, text, actor, ts, kind, root_seq FROM archive_document WHERE do_key = ? AND seq = ?"
+          ).bind(roomRef, String(row.seq))
+        );
+      }
+      if (statements.length) await this.env.DB.batch(statements);
+    }
+    const nextCursor = posts.length === 1_000 ? posts[posts.length - 1]!.seq : currentMax;
+    this.ctx.storage.sql.exec(
+      "INSERT INTO meta (key, value) VALUES ('post_search_cursor', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      nextCursor
+    );
+    return posts.length;
   }
 
   // S5.1/S5.2: next_seq lives only here, bumped atomically with the RETURNING trick
@@ -204,6 +608,17 @@ export class RoomDO extends DurableObject<Env> {
         key, value
       );
     }
+  }
+
+  private snapshotTableNames(): string[] {
+    const candidates = [
+      "meta", "item", "tombstone", "edit", "dedupe_local", "dedupe_fed", "subscription",
+      "post_index", "reaction", "archive_search_pending", "local_event", "federation_state", "signed_event_archive",
+    ];
+    const existing = new Set(this.ctx.storage.sql.exec<{ name: string }>(
+      "SELECT name FROM sqlite_master WHERE type = 'table'"
+    ).toArray().map((row) => row.name));
+    return candidates.filter((name) => existing.has(name));
   }
 
   // DO-to-DO push target, called by StrongholdDO.updateConfig.
@@ -328,6 +743,10 @@ export class RoomDO extends DurableObject<Env> {
       deny: claims.deny,
       last_seq: 0,
     };
+    this.ctx.storage.sql.exec(
+      "INSERT INTO meta (key, value) VALUES ('room_ref', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      claims.room
+    );
     server.serializeAttachment(attachment);
 
     return new Response(null, {
@@ -540,6 +959,7 @@ export class RoomDO extends DurableObject<Env> {
 
     const createdFrame = { type: "item.create", seq, parent_seq: parentSeq, root_seq: rootSeq, actor: attachment.actor, kind, ts, body: finalBody, client_id: clientId };
     const envelope = await this.appendSignedEvent(attachment.room, attachment.actor, createdFrame);
+    this.scheduleArchiveAlarm();
     this.sendAck(ws, { status: "ok", client_id: clientId, seq });
     this.enqueueBroadcast(ws, { ...createdFrame, envelope });
     this.reportTip(attachment.room, seq);
@@ -673,7 +1093,15 @@ export class RoomDO extends DurableObject<Env> {
     if (!body || typeof body !== "object" || Array.isArray(body)) {
       return { ok: false, code: "OMEW_MALFORMED", message: "body must be an object" };
     }
-    const target = this.ctx.storage.sql.exec<ItemRow>("SELECT * FROM item WHERE seq = ?", targetSeq).toArray();
+    let target = this.ctx.storage.sql.exec<ItemRow>("SELECT * FROM item WHERE seq = ?", targetSeq).toArray();
+    let archivedTarget = false;
+    if (target.length === 0) {
+      const archived = await this.findArchivedItem(targetSeq);
+      if (archived) {
+        target = [archived];
+        archivedTarget = true;
+      }
+    }
     if (target.length === 0) {
       return { ok: false, code: "OMEW_TARGET_NOT_FOUND", message: "target not found" };
     }
@@ -706,6 +1134,7 @@ export class RoomDO extends DurableObject<Env> {
       : b;
 
     const editedAt = Date.now();
+    const searchOverlayPending = archivedTarget || this.isInArchiveBatch(targetSeq) || this.isSearchIndexedPost(target[0]!);
     const seq = this.allocateSeq();
     const bodyJson = JSON.stringify(finalBody);
     this.ctx.storage.sql.exec(
@@ -713,6 +1142,10 @@ export class RoomDO extends DurableObject<Env> {
         "ON CONFLICT(target_seq) DO UPDATE SET seq = excluded.seq, body = excluded.body, edited_at = excluded.edited_at",
       targetSeq, seq, bodyJson, editedAt
     );
+    if (searchOverlayPending) {
+      this.ctx.storage.sql.exec("INSERT OR IGNORE INTO archive_search_pending (target_seq) VALUES (?)", targetSeq);
+      this.ctx.waitUntil(this.repairArchiveSearch().catch(() => {}));
+    }
 
     const editedFrame = { type: "item.update", seq, target_seq: targetSeq, body: finalBody, edited_at: editedAt };
     const envelope = await this.appendSignedEvent(roomRef, actor, editedFrame);
@@ -740,7 +1173,15 @@ export class RoomDO extends DurableObject<Env> {
       return { ok: true, seq: null };
     }
 
-    const target = this.ctx.storage.sql.exec<ItemRow>("SELECT * FROM item WHERE seq = ?", targetSeq).toArray();
+    let target = this.ctx.storage.sql.exec<ItemRow>("SELECT * FROM item WHERE seq = ?", targetSeq).toArray();
+    let archivedTarget = false;
+    if (target.length === 0) {
+      const archived = await this.findArchivedItem(targetSeq);
+      if (archived) {
+        target = [archived];
+        archivedTarget = true;
+      }
+    }
     if (target.length === 0) {
       return { ok: false, code: "OMEW_TARGET_NOT_FOUND", message: "target not found" };
     }
@@ -770,11 +1211,16 @@ export class RoomDO extends DurableObject<Env> {
     const byRole: "author" | "mod" | "owner" = isAuthor ? "author" : (role as "mod" | "owner");
 
     const ts = Date.now();
+    const searchOverlayPending = archivedTarget || this.isInArchiveBatch(targetSeq) || this.isSearchIndexedPost(target[0]!);
     const seq = this.allocateSeq();
     this.ctx.storage.sql.exec(
       "INSERT INTO tombstone (seq, actor, ts, reason) VALUES (?, ?, ?, ?)",
       targetSeq, actor, ts, reason ?? null
     );
+    if (searchOverlayPending) {
+      this.ctx.storage.sql.exec("INSERT OR IGNORE INTO archive_search_pending (target_seq) VALUES (?)", targetSeq);
+      this.ctx.waitUntil(this.repairArchiveSearch().catch(() => {}));
+    }
 
     const deletedFrame = { type: "item.delete", seq, target_seq: targetSeq, reason, by_role: byRole };
     const envelope = await this.appendSignedEvent(roomRef, actor, deletedFrame);
@@ -1124,10 +1570,18 @@ export class RoomDO extends DurableObject<Env> {
     return true;
   }
 
+  private scheduleArchiveAlarm(): void {
+    this.ctx.waitUntil((async () => {
+      if (!(await this.ctx.storage.getAlarm())) await this.ctx.storage.setAlarm(Date.now() + ARCHIVE_ALARM_MS);
+    })().catch(() => {}));
+  }
+
   // ---- history RPC ------------------------------------------------------------
 
   // S5.3: pagination is seq-anchored, never timestamp-anchored.
-  async getHistory(beforeSeq: number | null, limit: number, actor: string | null = null): Promise<unknown[]> {
+  async getHistory(beforeSeq: number | null, limit: number, actor: string | null = null): Promise<{
+    items: unknown[]; next_before: number | null; has_more: boolean;
+  }> {
     const cappedLimit = Math.max(1, Math.min(limit || HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT));
     const rows = beforeSeq == null
       ? this.ctx.storage.sql
@@ -1136,7 +1590,7 @@ export class RoomDO extends DurableObject<Env> {
              FROM item i
              LEFT JOIN edit e ON e.target_seq = i.seq
              LEFT JOIN tombstone t ON t.seq = i.seq
-             ORDER BY i.seq DESC LIMIT ?`,
+             WHERE t.seq IS NULL ORDER BY i.seq DESC LIMIT ?`,
             cappedLimit
           )
           .toArray()
@@ -1146,12 +1600,12 @@ export class RoomDO extends DurableObject<Env> {
              FROM item i
              LEFT JOIN edit e ON e.target_seq = i.seq
              LEFT JOIN tombstone t ON t.seq = i.seq
-             WHERE i.seq < ? ORDER BY i.seq DESC LIMIT ?`,
+             WHERE i.seq < ? AND t.seq IS NULL ORDER BY i.seq DESC LIMIT ?`,
             beforeSeq, cappedLimit
           )
           .toArray();
 
-    const items = rows
+    const hotItems = rows
       .filter((r) => r.tomb_seq == null)
       .map((r) => ({
         seq: r.seq,
@@ -1163,7 +1617,217 @@ export class RoomDO extends DurableObject<Env> {
         body: withoutTopics(JSON.parse(r.edit_body ?? r.body)),
         edited_at: r.edited_at ?? undefined,
       }));
-    return this.attachReactions(items, (i) => i.seq, actor);
+    const archivedPage = await this.getArchivedHistory(beforeSeq, Math.max(0, cappedLimit - hotItems.length));
+    const archivedItems = archivedPage.items;
+    const bySeq = new Map<number, (typeof hotItems)[number]>();
+    for (const item of archivedItems) bySeq.set(item.seq, item as (typeof hotItems)[number]);
+    for (const item of hotItems) bySeq.set(item.seq, item);
+    const merged = [...bySeq.values()]
+      .sort((a, b) => b.seq - a.seq)
+      .slice(0, cappedLimit);
+    const hotScanned = this.ctx.storage.sql.exec<{ seq: number }>(
+      `SELECT seq FROM item WHERE (? IS NULL OR seq < ?) ORDER BY seq DESC LIMIT ?`,
+      beforeSeq, beforeSeq, cappedLimit
+    ).toArray();
+    const scanCandidates = [...hotScanned.map((row) => row.seq), ...(archivedPage.scannedBefore == null ? [] : [archivedPage.scannedBefore])];
+    const nextBefore = scanCandidates.length ? Math.min(...scanCandidates) : null;
+    const roomRef = this.ctx.storage.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key = 'room_ref'").toArray()[0]?.value;
+    const hasOlderArchive = nextBefore != null && !!roomRef && !!(await this.env.DB.prepare(
+      "SELECT 1 AS found FROM archive_index WHERE do_key = ? AND seq_start < ? LIMIT 1"
+    ).bind(roomRef, nextBefore).first());
+    const hasMore = archivedPage.hasMore || hasOlderArchive || (nextBefore != null && !!this.ctx.storage.sql.exec<{ seq: number }>(
+      "SELECT seq FROM item WHERE seq < ? LIMIT 1", nextBefore
+    ).toArray()[0]);
+    return { items: await this.attachReactions(merged, (i) => i.seq, actor), next_before: hasMore ? nextBefore : null, has_more: hasMore };
+  }
+
+  private async getArchivedHistory(beforeSeq: number | null, limit: number, rootSeq?: number): Promise<{ items: {
+    seq: number; parent_seq: number | null; root_seq: number | null; actor: string; kind: string;
+    ts: number; body: unknown; edited_at?: number;
+  }[]; scannedBefore: number | null; hasMore: boolean }> {
+    if (limit <= 0) return { items: [], scannedBefore: null, hasMore: false };
+    const doKey = this.ctx.storage.sql.exec<{ value: string }>(
+      "SELECT value FROM meta WHERE key = 'room_ref'"
+    ).toArray()[0]?.value;
+    if (!doKey) return { items: [], scannedBefore: null, hasMore: false };
+    const indexes = await this.env.DB.prepare(
+      "SELECT seq_start, seq_end, r2_key FROM archive_index WHERE do_key = ? AND (? IS NULL OR seq_start < ?) ORDER BY seq_end DESC"
+    ).bind(doKey, beforeSeq, beforeSeq).all<{ seq_start: number; seq_end: number; r2_key: string }>();
+    const output: { seq: number; parent_seq: number | null; root_seq: number | null; actor: string; kind: string; ts: number; body: unknown; edited_at?: number }[] = [];
+    let scannedBefore: number | null = null;
+    let hasMore = false;
+    const appendBatch = (batch: ArchiveItem[]): boolean => {
+      const sideRows = this.ctx.storage.sql.exec<{
+        target_seq: number; edit_body: string | null; edited_at: number | null; tomb_seq: number | null;
+      }>(
+        `SELECT i.seq AS target_seq, e.body AS edit_body, e.edited_at, t.seq AS tomb_seq
+         FROM (SELECT ? AS seq ${batch.slice(1).map(() => "UNION ALL SELECT ? AS seq").join(" ")}) i
+         LEFT JOIN edit e ON e.target_seq = i.seq LEFT JOIN tombstone t ON t.seq = i.seq`,
+        ...batch.map((row) => row.seq)
+      ).toArray();
+      const sideBySeq = new Map(sideRows.map((row) => [row.target_seq, row]));
+      for (const row of batch) {
+        if (output.length >= limit) {
+          hasMore = true;
+          return false;
+        }
+        scannedBefore = scannedBefore == null ? row.seq : Math.min(scannedBefore, row.seq);
+        const side = sideBySeq.get(row.seq);
+        if (side?.tomb_seq != null) continue;
+        output.push({
+          seq: row.seq, parent_seq: row.parent_seq, root_seq: row.root_seq, actor: row.actor,
+          kind: row.kind, ts: row.ts, body: withoutTopics(JSON.parse(side?.edit_body ?? row.body)),
+          edited_at: side?.edited_at ?? undefined,
+        });
+      }
+      return true;
+    };
+    for (const shard of indexes.results) {
+      if (hasMore) break;
+      const object = await this.env.MEDIA.get(shard.r2_key);
+      if (!object?.body) continue;
+      let batch: ArchiveItem[] = [];
+      await readGzipRecordsUntil(object.body, (record) => {
+        if (record.type !== "item" || (beforeSeq != null && record.row.seq >= beforeSeq) ||
+            (rootSeq != null && record.row.root_seq !== rootSeq)) return true;
+        batch.push(record.row);
+        if (batch.length < 400) return true;
+        const continueReading = appendBatch(batch);
+        batch = [];
+        return continueReading;
+      });
+      if (batch.length && output.length < limit) appendBatch(batch);
+    }
+    output.sort((a, b) => b.seq - a.seq);
+    output.splice(limit);
+    return { items: output, scannedBefore, hasMore };
+  }
+
+  private async findArchivedItem(targetSeq: number): Promise<ArchiveItem | null> {
+    const doKey = this.ctx.storage.sql.exec<{ value: string }>(
+      "SELECT value FROM meta WHERE key = 'room_ref'"
+    ).toArray()[0]?.value;
+    if (!doKey) return null;
+    const shard = await this.env.DB.prepare(
+      "SELECT r2_key FROM archive_index WHERE do_key = ? AND seq_start <= ? AND seq_end >= ? ORDER BY seq_start DESC LIMIT 1"
+    ).bind(doKey, targetSeq, targetSeq).first<{ r2_key: string }>();
+    if (!shard) return null;
+    const object = await this.env.MEDIA.get(shard.r2_key);
+    if (!object?.body) return null;
+    let found: ArchiveItem | null = null;
+    await readGzipRecordsUntil(object.body, (record) => {
+      if (record.type !== "item" || record.row.seq !== targetSeq) return true;
+      found = record.row;
+      return false;
+    });
+    return found;
+  }
+
+  private async repairArchiveSearch(): Promise<number> {
+    const doKey = this.ctx.storage.sql.exec<{ value: string }>(
+      "SELECT value FROM meta WHERE key = 'room_ref'"
+    ).toArray()[0]?.value;
+    if (!doKey) return 0;
+    const pending = this.ctx.storage.sql.exec<{ target_seq: number }>(
+      "SELECT target_seq FROM archive_search_pending ORDER BY target_seq LIMIT 100"
+    ).toArray();
+    let repaired = 0;
+    for (const { target_seq: targetSeq } of pending) {
+      const hotRow = this.ctx.storage.sql.exec<ArchiveItem>(
+        "SELECT seq, parent_seq, root_seq, actor, origin, client_id, kind, ts, body FROM item WHERE seq = ?",
+        targetSeq
+      ).toArray()[0];
+      const itemRow = hotRow ?? await this.findArchivedItem(targetSeq);
+      if (!itemRow) continue;
+      const side = this.ctx.storage.sql.exec<{ body: string | null; tomb_seq: number | null }>(
+        "SELECT e.body, t.seq AS tomb_seq FROM (SELECT ? AS seq) item LEFT JOIN edit e ON e.target_seq = item.seq LEFT JOIN tombstone t ON t.seq = item.seq",
+        targetSeq
+      ).one();
+      const prior = await this.env.DB.prepare(
+        "SELECT rowid, do_key, seq, text, actor, ts, kind, root_seq FROM archive_document WHERE do_key = ? AND seq = ?"
+      ).bind(doKey, String(targetSeq)).first<{
+        rowid: number; do_key: string; seq: string; text: string; actor: string; ts: string; kind: string; root_seq: string;
+      }>();
+      const statements = [];
+      if (prior) {
+        statements.push(this.env.DB.prepare(
+          "INSERT INTO archive_search(archive_search, rowid, do_key, seq, text, actor, ts, kind, root_seq) VALUES ('delete', ?, ?, ?, ?, ?, ?, ?, ?)"
+        ).bind(prior.rowid, prior.do_key, prior.seq, prior.text, prior.actor, prior.ts, prior.kind, prior.root_seq));
+      }
+      if (side.tomb_seq != null) {
+        if (prior) statements.push(this.env.DB.prepare("DELETE FROM archive_document WHERE rowid = ?").bind(prior.rowid));
+      } else if (prior) {
+        statements.push(this.env.DB.prepare("UPDATE archive_document SET text = ? WHERE rowid = ?")
+          .bind(searchableText(side.body ?? itemRow.body), prior.rowid));
+        statements.push(this.env.DB.prepare(
+          "INSERT INTO archive_search(rowid, do_key, seq, text, actor, ts, kind, root_seq) " +
+          "SELECT rowid, do_key, seq, text, actor, ts, kind, root_seq FROM archive_document WHERE rowid = ?"
+        ).bind(prior.rowid));
+      } else {
+        const text = searchableText(side.body ?? itemRow.body);
+        statements.push(this.env.DB.prepare(
+          "INSERT INTO archive_document (do_key, seq, text, actor, ts, kind, root_seq) VALUES (?, ?, ?, ?, ?, ?, ?)"
+          ).bind(doKey, String(targetSeq), text, itemRow.actor, String(itemRow.ts), itemRow.kind, itemRow.root_seq == null ? "" : String(itemRow.root_seq)));
+        statements.push(this.env.DB.prepare(
+          "INSERT INTO archive_search(rowid, do_key, seq, text, actor, ts, kind, root_seq) " +
+          "SELECT rowid, do_key, seq, text, actor, ts, kind, root_seq FROM archive_document WHERE do_key = ? AND seq = ?"
+        ).bind(doKey, String(targetSeq)));
+      }
+      if (statements.length) await this.env.DB.batch(statements);
+      this.ctx.storage.sql.exec("DELETE FROM archive_search_pending WHERE target_seq = ?", targetSeq);
+      repaired++;
+    }
+    return repaired;
+  }
+
+  async searchRecent(query: string, limit: number, actor: string | null = null): Promise<unknown[]> {
+    const terms = query.toLocaleLowerCase().split(/\s+/).filter(Boolean);
+    if (!terms.length) return [];
+    const rows = this.ctx.storage.sql.exec<ItemRow & {
+      edit_body: string | null; edited_at: number | null; tomb_seq: number | null;
+    }>(
+      `SELECT i.*, e.body AS edit_body, e.edited_at, t.seq AS tomb_seq
+       FROM item i LEFT JOIN edit e ON e.target_seq = i.seq LEFT JOIN tombstone t ON t.seq = i.seq
+       WHERE i.ts >= ? ORDER BY i.seq DESC LIMIT 50000`,
+      Date.now() - HOT_AGE_MS
+    ).toArray();
+    const matches = rows.filter((row) => {
+      if (row.tomb_seq != null) return false;
+      const body = searchableText(row.edit_body ?? row.body).toLocaleLowerCase();
+      return terms.every((term) => body.includes(term));
+    }).slice(0, Math.max(1, Math.min(limit, 100))).map((row) => ({
+      seq: row.seq, parent_seq: row.parent_seq, root_seq: row.root_seq, actor: row.actor,
+      kind: row.kind, ts: row.ts, body: withoutTopics(JSON.parse(row.edit_body ?? row.body)),
+      edited_at: row.edited_at ?? undefined,
+    }));
+    return this.attachReactions(matches, (item) => item.seq, actor);
+  }
+
+  async applyArchiveSearchOverlays<T extends { seq: number; text: string; actor: string; ts: number; kind: string; root_seq: string | number }>(
+    matches: T[], query: string,
+  ): Promise<T[]> {
+    const terms = query.toLocaleLowerCase().split(/\s+/).filter(Boolean);
+    const output: T[] = [];
+    for (let offset = 0; offset < matches.length; offset += 400) {
+      const batch = matches.slice(offset, offset + 400);
+      const sideRows = this.ctx.storage.sql.exec<{
+        seq: number; edit_body: string | null; edited_at: number | null; tomb_seq: number | null;
+      }>(
+        `SELECT source.seq, e.body AS edit_body, e.edited_at, t.seq AS tomb_seq
+         FROM (${batch.map(() => "SELECT ? AS seq").join(" UNION ALL ")}) source
+         LEFT JOIN edit e ON e.target_seq = source.seq LEFT JOIN tombstone t ON t.seq = source.seq`,
+        ...batch.map((row) => row.seq)
+      ).toArray();
+      const sides = new Map(sideRows.map((row) => [row.seq, row]));
+      for (const match of batch) {
+        const side = sides.get(match.seq);
+        if (side?.tomb_seq != null) continue;
+        const text = side?.edit_body ? searchableText(side.edit_body) : match.text;
+        if (!terms.every((term) => text.toLocaleLowerCase().includes(term))) continue;
+        output.push({ ...match, text } as T);
+      }
+    }
+    return output;
   }
 
   // ---- section posts RPC (proposal S4.5) ---------------------------------------
@@ -1283,8 +1947,8 @@ export class RoomDO extends DurableObject<Env> {
              FROM item i
              LEFT JOIN tombstone t ON t.seq = i.seq
              LEFT JOIN edit e ON e.target_seq = i.seq
-             WHERE i.root_seq = ? AND i.parent_seq IS NOT NULL ORDER BY i.seq DESC LIMIT ?`,
-            postSeq, cappedLimit
+             WHERE i.root_seq = ? AND i.parent_seq IS NOT NULL AND t.seq IS NULL ORDER BY i.seq DESC LIMIT ?`,
+            postSeq, cappedLimit + 1
           )
           .toArray()
       : this.ctx.storage.sql
@@ -1293,16 +1957,24 @@ export class RoomDO extends DurableObject<Env> {
              FROM item i
              LEFT JOIN tombstone t ON t.seq = i.seq
              LEFT JOIN edit e ON e.target_seq = i.seq
-             WHERE i.root_seq = ? AND i.parent_seq IS NOT NULL AND i.seq < ? ORDER BY i.seq DESC LIMIT ?`,
-            postSeq, before, cappedLimit
+             WHERE i.root_seq = ? AND i.parent_seq IS NOT NULL AND i.seq < ? AND t.seq IS NULL ORDER BY i.seq DESC LIMIT ?`,
+            postSeq, before, cappedLimit + 1
           )
           .toArray();
 
-    const replies = replyRows
+    const hotReplies = replyRows
       .filter((r) => r.tomb_seq == null)
       .map((r) => ({ seq: r.seq, actor: r.actor, ts: r.ts, body: withoutTopics(JSON.parse(r.edit_body ?? r.body)), edited_at: r.edited_at ?? undefined }));
-    const lastRow = replyRows[replyRows.length - 1];
-    const next_before = replyRows.length === cappedLimit && lastRow ? lastRow.seq : null;
+    const coldReplies = (await this.getArchivedHistory(before, cappedLimit + 1, postSeq)).items
+      .map((r) => ({ seq: r.seq, actor: r.actor, ts: r.ts, body: r.body, edited_at: r.edited_at }));
+    const repliesBySeq = new Map<number, (typeof hotReplies)[number]>();
+    for (const reply of coldReplies) repliesBySeq.set(reply.seq, reply as (typeof hotReplies)[number]);
+    for (const reply of hotReplies) repliesBySeq.set(reply.seq, reply);
+    const mergedReplies = [...repliesBySeq.values()].sort((a, b) => b.seq - a.seq);
+    const hasMoreReplies = mergedReplies.length > cappedLimit;
+    const replies = mergedReplies.slice(0, cappedLimit);
+    const lastReply = replies[replies.length - 1];
+    const next_before = hasMoreReplies && lastReply ? lastReply.seq : null;
     return {
       post: this.attachReactions([post], (p) => p.post_seq, actor)[0],
       replies: this.attachReactions(replies, (r) => r.seq, actor),

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
+import { api } from '../api'
 import { EMPTY_STATE } from '../assets/mew'
 import { useAuth } from '../composables/useAuth'
 import { useAuthModal } from '../composables/useAuthModal'
@@ -26,7 +27,7 @@ import MessageBubble, { type MessageVM } from './MessageBubble.vue'
 const auth = useAuth()
 const { packs } = useEmotes()
 const { openAuthModal } = useAuthModal()
-const { isReadOnly } = useStronghold()
+const { isReadOnly, selectedNodeId } = useStronghold()
 const { config: instanceConfig } = useInstanceConfig()
 const { canEdit, canRetract } = useItemPermissions()
 const { members } = useStrongholdMembers()
@@ -38,6 +39,7 @@ const {
   hasMoreHistory,
   muted,
   loadOlder,
+  loadUntil,
   sendText,
   resend,
   editMessage,
@@ -59,6 +61,11 @@ const emotesEnabled = computed(() => instanceConfig.value?.emotes_enabled !== fa
 const reactionsEnabled = computed(() => instanceConfig.value?.reactions_enabled !== false)
 const artAssetsEnabled = computed(() => instanceConfig.value?.art_assets_enabled !== false)
 const CHAT_INPUT_MAX_HEIGHT = 140
+const searchOpen = ref(false)
+const searchQuery = ref('')
+const searchSubmitted = ref(false)
+const searchLoading = ref(false)
+const searchResults = ref<Awaited<ReturnType<typeof api.searchRoomHistory>>>([])
 
 // one shared context-menu instance for every message row (rather than one per
 // row) - activeMessage tracks which row's right-click/long-press opened it.
@@ -165,6 +172,36 @@ function pickEmote(code: string) {
 function onLoadOlder() {
   void preserveOnPrepend(loadOlder)
 }
+
+async function searchMessages() {
+  const query = searchQuery.value.trim()
+  const nodeId = selectedNodeId.value
+  const room = selectedChannel.value
+  if (!query || !nodeId || !room) return
+  searchSubmitted.value = true
+  searchLoading.value = true
+  try {
+    searchResults.value = await api.searchRoomHistory(auth.token.value, nodeId, room.id, query)
+  } catch {
+    searchResults.value = []
+  } finally {
+    searchLoading.value = false
+  }
+}
+
+async function openSearchResult(seq: number) {
+  if (!(await loadUntil(seq))) return
+  searchOpen.value = false
+  searchQuery.value = ''
+  searchResults.value = []
+  await nextTick()
+  document.querySelector<HTMLElement>(`[data-message-seq="${seq}"]`)?.scrollIntoView({ block: 'center' })
+}
+
+watch(() => selectedChannel.value?.id, () => {
+  searchResults.value = []
+  searchSubmitted.value = false
+})
 
 function onEnter(event: KeyboardEvent) {
   if (event.shiftKey) return
@@ -276,6 +313,23 @@ watch(() => selectedChannel.value?.id, pin, { flush: 'post' })
 
 <template>
   <section class="chat-pane">
+    <form v-if="selectedChannel" class="chat-pane__search" role="search" @submit.prevent="searchMessages">
+      <WinButton Style="SubtleButtonStyle" :aria-expanded="searchOpen" aria-label="搜索当前聊天" @click="searchOpen = !searchOpen">
+        ⌕
+      </WinButton>
+      <template v-if="searchOpen">
+        <input v-model="searchQuery" type="search" maxlength="200" placeholder="搜索当前聊天" aria-label="搜索聊天消息" />
+        <WinButton Style="AccentButtonStyle" :IsEnabled="!!searchQuery.trim() && !searchLoading" type="submit">
+          {{ searchLoading ? '搜索中…' : '搜索' }}
+        </WinButton>
+        <div v-if="searchSubmitted" class="chat-pane__search-results" aria-live="polite">
+          <button v-for="item in searchResults" :key="item.seq" type="button" @click="openSearchResult(item.seq)">
+            <span>{{ item.text }}</span><small>{{ new Date(item.ts).toLocaleString() }}</small>
+          </button>
+          <span v-if="!searchLoading && !searchResults.length">没有找到匹配内容</span>
+        </div>
+      </template>
+    </form>
     <div ref="scrollEl" class="chat-pane__messages">
       <div v-if="hasMoreHistory" class="chat-pane__load-more">
         <WinButton Style="SubtleButtonStyle" :IsEnabled="!historyLoading" @click="onLoadOlder">
@@ -286,6 +340,7 @@ watch(() => selectedChannel.value?.id, pin, { flush: 'post' })
       <MessageBubble
         v-for="entry in groupedMessages"
         :key="entry.message.key"
+        :data-message-seq="entry.message.seq ?? undefined"
         :message="entry.message"
         :grouped="entry.grouped"
         :editing="entry.message.seq !== null && editingSeq === entry.message.seq"
@@ -383,6 +438,53 @@ watch(() => selectedChannel.value?.id, pin, { flush: 'post' })
   min-height: 0;
   display: flex;
   flex-direction: column;
+}
+
+.chat-pane__search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.75rem;
+  border-bottom: 1px solid var(--stroke-divider);
+}
+
+.chat-pane__search input {
+  min-width: 0;
+  flex: 1;
+}
+
+.chat-pane__search-results {
+  position: absolute;
+  z-index: 5;
+  inset: 100% 0 auto;
+  display: grid;
+  max-height: 16rem;
+  overflow-y: auto;
+  background: var(--layer-default);
+  border: 1px solid var(--stroke-divider);
+  box-shadow: 0 0.5rem 1.5rem rgb(0 0 0 / 18%);
+}
+
+.chat-pane__search-results button {
+  display: grid;
+  gap: 0.25rem;
+  padding: 0.65rem 0.8rem;
+  color: var(--text-primary);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--stroke-divider);
+}
+
+.chat-pane__search-results button:hover {
+  background: var(--layer-secondary);
+}
+
+.chat-pane__search-results small,
+.chat-pane__search-results > span {
+  padding: 0.5rem 0.8rem;
+  color: var(--text-tertiary);
 }
 
 .chat-pane__messages {
