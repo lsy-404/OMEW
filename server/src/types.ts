@@ -100,6 +100,7 @@ export interface TotpPendingTokenClaims {
   actor: string;
   exp: number;
   jti: string;
+  iat?: number;
 }
 
 export interface WebauthnRegChallengeClaims {
@@ -117,6 +118,7 @@ export interface WebauthnAuthChallengeClaims {
   challenge: string;
   exp: number;
   jti: string;
+  iat?: number;
 }
 
 // Instance-level identity/governance policy (m0-protocol §7.9) - deployment env

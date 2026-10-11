@@ -235,6 +235,8 @@ async function submitAccountEmail() {
   } catch (error) {
     emailVerificationError.value = error instanceof ApiRequestError && error.code === 'EMAIL_TAKEN'
       ? '该邮箱已关联到其他账号。'
+      : error instanceof ApiRequestError && error.code === 'EMAIL_NOT_CONFIGURED'
+        ? '节点管理员尚未配置邮件服务。'
       : error instanceof ApiRequestError && error.code === 'EMAIL_RATE_LIMITED'
         ? '发送过于频繁，请稍后重试。'
         : error instanceof ApiRequestError && error.code === 'EMAIL_SEND_FAILED'
@@ -255,9 +257,11 @@ async function resendEmailVerification() {
     emailVerificationSent.value = !result.already_verified
     if (result.already_verified) auth.updateUser({ email_verified: true })
   } catch (error) {
-    emailVerificationError.value = error instanceof ApiRequestError && error.code === 'EMAIL_RATE_LIMITED'
-      ? '发送过于频繁，请稍后重试。'
-      : '验证邮件发送失败，请稍后重试。'
+    emailVerificationError.value = error instanceof ApiRequestError && error.code === 'EMAIL_NOT_CONFIGURED'
+      ? '节点管理员尚未配置邮件服务。'
+      : error instanceof ApiRequestError && error.code === 'EMAIL_RATE_LIMITED'
+        ? '发送过于频繁，请稍后重试。'
+        : '验证邮件发送失败，请稍后重试。'
   } finally {
     emailVerificationBusy.value = false
   }
