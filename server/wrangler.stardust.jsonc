@@ -47,8 +47,15 @@
     "ALLOW_GUEST_BROWSING": "1",
     "MAX_FILE_BYTES": "10485760",
     "USER_STORAGE_QUOTA_BYTES": "209715200",
-    "LIVEKIT_URL": ""
+    "LIVEKIT_URL": "",
+    "EMAIL_FROM": "noreply@omew.wuyilingwei.com",
+    "EMAIL_FROM_NAME": "OMEW",
+    "TURNSTILE_SITE_KEY": "",
+    "TURNSTILE_ALLOWED_HOSTNAMES": "omew.stardustinfinity.top"
   },
+  "send_email": [
+    { "name": "EMAIL", "remote": true, "allowed_sender_addresses": ["noreply@omew.wuyilingwei.com"] }
+  ],
   "d1_databases": [
     {
       "binding": "DB",

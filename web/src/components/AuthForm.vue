@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { startAuthentication } from '@simplewebauthn/browser'
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { api, ApiRequestError } from '../api'
 import type { AuthResponse, RootRequirement } from '../api/types'
 import { useAuth } from '../composables/useAuth'
@@ -25,6 +25,165 @@ const ssoAvailable = computed(() => instanceConfig.value?.sso_mode !== 'disabled
 const ssoBusy = ref(false)
 const ssoError = ref('')
 
+type RecoveryMode = 'none' | 'request' | 'complete'
+interface TurnstileApi {
+  render(element: HTMLElement, options: { sitekey: string; action: string; callback: (token: string) => void; 'expired-callback': () => void; 'error-callback': () => void }): string
+  reset(widgetId?: string): void
+  remove(widgetId: string): void
+}
+declare global {
+  interface Window { turnstile?: TurnstileApi }
+}
+const recoveryMode = ref<RecoveryMode>('none')
+const recoveryForm = reactive({ email: '', password: '', confirmPassword: '' })
+const recoveryToken = ref('')
+const recoveryBusy = ref(false)
+const recoveryError = ref('')
+const recoveryNotice = ref('')
+const turnstileHost = ref<HTMLElement | null>(null)
+const turnstileToken = ref('')
+let turnstileWidget: string | null = null
+let turnstileScript: HTMLScriptElement | null = null
+const turnstileSiteKey = computed(() => instanceConfig.value?.turnstile_site_key ?? null)
+const turnstileAction = computed(() => recoveryMode.value === 'request' ? 'password-reset' : 'register')
+
+function loadTurnstile(): Promise<TurnstileApi> {
+  if (window.turnstile) return Promise.resolve(window.turnstile)
+  return new Promise((resolve, reject) => {
+    const existing = document.querySelector<HTMLScriptElement>('script[data-omew-turnstile]')
+    if (existing) {
+      existing.addEventListener('load', () => window.turnstile ? resolve(window.turnstile) : reject(new Error('Turnstile unavailable')), { once: true })
+      existing.addEventListener('error', () => reject(new Error('Turnstile unavailable')), { once: true })
+      return
+    }
+    const script = document.createElement('script')
+    script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit'
+    script.async = true
+    script.defer = true
+    script.dataset.omewTurnstile = 'true'
+    turnstileScript = script
+    script.onload = () => window.turnstile ? resolve(window.turnstile) : reject(new Error('Turnstile unavailable'))
+    script.onerror = () => reject(new Error('Turnstile unavailable'))
+    document.head.append(script)
+  })
+}
+
+async function renderTurnstile() {
+  if (turnstileWidget) window.turnstile?.remove(turnstileWidget)
+  turnstileWidget = null
+  turnstileToken.value = ''
+  if (!turnstileSiteKey.value || !turnstileHost.value || recoveryMode.value === 'complete') return
+  try {
+    const api = await loadTurnstile()
+    const host = turnstileHost.value
+    if (!host) return
+    turnstileWidget = api.render(host, {
+      sitekey: turnstileSiteKey.value,
+      action: turnstileAction.value,
+      callback: (token) => { turnstileToken.value = token },
+      'expired-callback': () => { turnstileToken.value = '' },
+      'error-callback': () => { turnstileToken.value = '' },
+    })
+  } catch {
+    turnstileToken.value = ''
+  }
+}
+
+function resetTurnstile() {
+  if (turnstileWidget) window.turnstile?.reset(turnstileWidget)
+  turnstileToken.value = ''
+}
+
+function clearAccountActionHash() {
+  history.replaceState(null, '', `${window.location.pathname}${window.location.search}`)
+}
+
+onMounted(async () => {
+  const params = new URLSearchParams(window.location.hash.replace(/^#/, ''))
+  const action = params.get('account_action')
+  const token = params.get('token')
+  if (!action || !token || params.getAll('account_action').length !== 1 || token.length > 128) return
+  clearAccountActionHash()
+  if (action === 'password_reset') {
+    recoveryToken.value = token
+    recoveryMode.value = 'complete'
+    return
+  }
+  if (action === 'email_verification') {
+    recoveryBusy.value = true
+    try {
+      const result = await api.verifyAccountEmail(token)
+      if (auth.user.value?.email?.toLowerCase() === result.email.toLowerCase()) auth.updateUser({ email_verified: true })
+      recoveryNotice.value = '邮箱验证成功。'
+    } catch {
+      recoveryError.value = '验证链接已失效或已使用，请重新发送验证邮件。'
+    } finally {
+      recoveryBusy.value = false
+    }
+  }
+})
+
+onBeforeUnmount(() => {
+  if (turnstileWidget) window.turnstile?.remove(turnstileWidget)
+  if (turnstileScript && !window.turnstile) turnstileScript.remove()
+})
+
+function openPasswordReset() {
+  recoveryMode.value = 'request'
+  recoveryError.value = ''
+  recoveryNotice.value = ''
+}
+
+function closePasswordReset() {
+  recoveryMode.value = 'none'
+  recoveryError.value = ''
+  recoveryNotice.value = ''
+  resetTurnstile()
+}
+
+async function requestPasswordReset() {
+  if (recoveryBusy.value) return
+  recoveryError.value = emailError(recoveryForm.email)
+  recoveryNotice.value = ''
+  if (recoveryError.value) return
+  if (turnstileSiteKey.value && !turnstileToken.value) {
+    recoveryError.value = '请先完成安全验证。'
+    return
+  }
+  recoveryBusy.value = true
+  try {
+    await api.requestPasswordReset(recoveryForm.email, turnstileToken.value || undefined)
+    recoveryNotice.value = '如果该邮箱对应已验证的 OMEW 账号，我们已发送密码重置邮件。'
+  } catch (error) {
+    recoveryError.value = error instanceof ApiRequestError && error.code === 'EMAIL_SEND_FAILED'
+      ? '邮件暂时无法发送，请稍后重试或联系节点管理员。'
+      : '请求未完成，请稍后重试。'
+  } finally {
+    recoveryBusy.value = false
+    resetTurnstile()
+  }
+}
+
+async function completePasswordReset() {
+  if (recoveryBusy.value) return
+  const errors = [passwordError(recoveryForm.password), recoveryForm.password !== recoveryForm.confirmPassword ? '两次输入的密码不一致' : ''].filter(Boolean)
+  recoveryError.value = errors.join('；')
+  if (recoveryError.value) return
+  recoveryBusy.value = true
+  try {
+    await api.completePasswordReset(recoveryToken.value, recoveryForm.password)
+    recoveryMode.value = 'none'
+    tab.value = 'login'
+    recoveryForm.password = ''
+    recoveryForm.confirmPassword = ''
+    recoveryNotice.value = '密码已重置，请使用新密码登录。'
+  } catch {
+    recoveryError.value = '重置链接已失效或已使用，请重新申请。'
+  } finally {
+    recoveryBusy.value = false
+  }
+}
+
 function startSso() {
   if (ssoBusy.value || !ssoAvailable.value) return
   ssoBusy.value = true
@@ -35,6 +194,10 @@ function startSso() {
 
 type Tab = 'login' | 'register'
 const tab = ref<Tab>('login')
+watch([turnstileSiteKey, turnstileAction, recoveryMode, tab], async () => {
+  await nextTick()
+  await renderTurnstile()
+})
 const TAB_OPTIONS: { Text: string; value: Tab }[] = [
   { Text: '登录', value: 'login' },
   { Text: '注册', value: 'register' },
@@ -188,19 +351,24 @@ async function submitRegister() {
   const errors = [
     usernameError(registerForm.username),
     passwordError(registerForm.password),
-    needs('email') ? emailError(registerForm.email) : '',
+      registerForm.email || needs('email') ? emailError(registerForm.email) : '',
     needs('code') ? requiredError(registerForm.code, '邀请码') : '',
   ].filter(Boolean)
   registerError.value = errors.join('；')
   if (registerError.value) return
+  if (turnstileSiteKey.value && !turnstileToken.value) {
+    registerError.value = '请先完成安全验证。'
+    return
+  }
   registerBusy.value = true
   try {
     const { pubkeyBase64, envelope } = await generateOwnershipKey(registerForm.password)
     const session = await auth.register({
       username: registerForm.username,
       password: registerForm.password,
-      email: needs('email') ? registerForm.email : undefined,
+      email: registerForm.email || undefined,
       code: needs('code') ? registerForm.code : undefined,
+      turnstile_token: turnstileToken.value || undefined,
       ownership_pubkey: pubkeyBase64,
       ownership_ciphertext: envelopeToCiphertextField(envelope),
     })
@@ -209,6 +377,7 @@ async function submitRegister() {
     registerError.value = registerErrorMessage(err)
   } finally {
     registerBusy.value = false
+    resetTurnstile()
   }
 }
 
@@ -240,6 +409,12 @@ watch(
     <WinInfoBar v-if="configError" :IsOpen="true" :IsClosable="false" :IsIconVisible="false" Severity="Error">
       {{ configError }}
     </WinInfoBar>
+    <WinInfoBar v-if="recoveryNotice && recoveryMode === 'none'" :IsOpen="true" :IsClosable="false" :IsIconVisible="false" Severity="Informational">
+      {{ recoveryNotice }}
+    </WinInfoBar>
+    <WinInfoBar v-if="recoveryError && recoveryMode === 'none'" :IsOpen="true" :IsClosable="false" :IsIconVisible="false" Severity="Error">
+      {{ recoveryError }}
+    </WinInfoBar>
 
     <WinSelectorBar
       v-if="instanceConfig?.allow_root && !ssoRequired"
@@ -250,6 +425,41 @@ watch(
     />
 
     <template v-if="tab === 'login'">
+      <form v-if="recoveryMode === 'request'" class="auth-form" novalidate @submit.prevent="requestPasswordReset">
+        <p class="field__hint">如果该邮箱对应已验证的 OMEW 账号，我们会发送一次性重置链接。</p>
+        <div class="field">
+          <label class="field__label" for="reset-request-email">注册邮箱</label>
+          <input id="reset-request-email" v-model.trim="recoveryForm.email" type="email" autocomplete="email" />
+        </div>
+        <div v-if="turnstileSiteKey" ref="turnstileHost" class="turnstile-widget" />
+        <p v-if="recoveryNotice" class="field__hint">{{ recoveryNotice }}</p>
+        <p v-if="recoveryError" class="field__error">{{ recoveryError }}</p>
+        <WinButton Style="AccentButtonStyle" class="auth-form__submit" type="submit" :IsEnabled="!recoveryBusy">
+          {{ recoveryBusy ? '正在发送…' : '发送重置邮件' }}
+        </WinButton>
+        <WinButton Style="SubtleButtonStyle" class="auth-form__submit" type="button" @click="closePasswordReset">返回登录</WinButton>
+      </form>
+
+      <form v-else-if="recoveryMode === 'complete'" class="auth-form" novalidate @submit.prevent="completePasswordReset">
+        <WinInfoBar :IsOpen="true" :IsClosable="false" :IsIconVisible="false" Severity="Warning">
+          密码重置不会解密旧密码保护的所有权私钥。若你用登录密码托管该密钥，重置后仍需原密码或可用的密钥恢复方式。
+        </WinInfoBar>
+        <div class="field">
+          <label class="field__label" for="reset-new-password">新密码</label>
+          <input id="reset-new-password" v-model="recoveryForm.password" type="password" autocomplete="new-password" />
+        </div>
+        <div class="field">
+          <label class="field__label" for="reset-confirm-password">确认新密码</label>
+          <input id="reset-confirm-password" v-model="recoveryForm.confirmPassword" type="password" autocomplete="new-password" />
+        </div>
+        <p v-if="recoveryError" class="field__error">{{ recoveryError }}</p>
+        <WinButton Style="AccentButtonStyle" class="auth-form__submit" type="submit" :IsEnabled="!recoveryBusy">
+          {{ recoveryBusy ? '正在重置…' : '重置密码' }}
+        </WinButton>
+        <WinButton Style="SubtleButtonStyle" class="auth-form__submit" type="button" @click="openPasswordReset">重新申请重置链接</WinButton>
+      </form>
+
+      <template v-else>
       <template v-if="ssoRequired">
         <p class="field__hint">本节点仅允许使用统一身份登录。</p>
         <WinButton
@@ -280,6 +490,9 @@ watch(
         <p v-if="loginError" class="field__error">{{ loginError }}</p>
         <WinButton Style="AccentButtonStyle" class="auth-form__submit" type="submit" :IsEnabled="!loginBusy">
           {{ loginBusy ? '登录中…' : '登录' }}
+        </WinButton>
+        <WinButton Style="SubtleButtonStyle" class="auth-form__submit" type="button" @click="openPasswordReset">
+          忘记密码？
         </WinButton>
 
         <template v-if="supportsPasskeys">
@@ -332,12 +545,16 @@ watch(
         <p v-if="ssoError" class="field__error">{{ ssoError }}</p>
       </template>
       </template>
+      </template>
     </template>
 
     <template v-else>
       <div v-if="pendingBackup" class="auth-form">
         <WinInfoBar :IsOpen="true" :IsClosable="false" :IsIconVisible="false" Severity="Success">
           注册成功。请务必导出并妥善保管所有权密钥备份——导出内容含你的加密私钥，是账号迁移的唯一凭证，服务器不会保存明文私钥。
+        </WinInfoBar>
+        <WinInfoBar v-if="pendingBackup.session.email_verification_required" :IsOpen="true" :IsClosable="false" :IsIconVisible="false" Severity="Informational">
+          验证邮件已发送，请前往邮箱完成验证。你可以先导出所有权密钥备份。
         </WinInfoBar>
         <WinButton Style="DefaultButtonStyle" @click="exportBackup">导出所有权密钥备份</WinButton>
         <WinButton Style="AccentButtonStyle" class="auth-form__submit" @click="finishRegistration">
@@ -355,8 +572,8 @@ watch(
           <label class="field__label" for="register-password">密码</label>
           <input id="register-password" v-model="registerForm.password" type="password" autocomplete="new-password" />
         </div>
-        <div v-if="needs('email')" class="field">
-          <label class="field__label" for="register-email">邮箱</label>
+        <div class="field">
+          <label class="field__label" for="register-email">邮箱{{ needs('email') ? '（必填）' : '（选填）' }}</label>
           <input id="register-email" v-model.trim="registerForm.email" type="email" autocomplete="email" />
         </div>
         <WinInfoBar v-if="needs('phone')" :IsOpen="true" :IsClosable="false" :IsIconVisible="false" Severity="Warning">
@@ -366,6 +583,8 @@ watch(
           <label class="field__label" for="register-code">邀请码</label>
           <input id="register-code" v-model.trim="registerForm.code" type="text" />
         </div>
+
+        <div v-if="turnstileSiteKey" ref="turnstileHost" class="turnstile-widget" />
 
         <p class="field__hint">
           账号所有权密钥将使用登录密码托管加密，无需单独设置。
@@ -415,6 +634,10 @@ watch(
   width: 100%;
   justify-content: center;
   margin-top: 0.15rem;
+}
+
+.turnstile-widget {
+  min-height: 65px;
 }
 
 .auth-form__divider {

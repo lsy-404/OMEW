@@ -35,6 +35,7 @@ export interface InstanceConfig {
   sso_provider_name: string
   sso_session_locked: boolean
   sso_nickname_locked: boolean
+  turnstile_site_key: string | null
   logo_url: string | null
   emotes_enabled: boolean
   builtin_emotes_enabled: boolean
@@ -95,6 +96,7 @@ export interface AuthResponse {
   token: string
   user: AuthUser
   auth_source?: 'local' | 'sso'
+  email_verification_required?: boolean
 }
 
 export interface UserProfile {
@@ -114,6 +116,7 @@ export interface RegisterPayload {
   password: string
   email?: string
   code?: string
+  turnstile_token?: string
   ownership_pubkey: string
   ownership_ciphertext: string
 }

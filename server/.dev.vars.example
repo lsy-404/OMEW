@@ -3,6 +3,17 @@ LIVEKIT_URL=http://localhost:7880
 LIVEKIT_API_KEY=devkey
 LIVEKIT_API_SECRET=secret
 
+# Email sending requires an onboarded Cloudflare Email Service sender domain.
+# Enable the EMAIL binding in wrangler.jsonc with remote=true for local sends.
+EMAIL_FROM=noreply@omew.wuyilingwei.com
+EMAIL_FROM_NAME=OMEW
+
+# Turnstile is enforced only when both keys are present. Keep the secret out of
+# this example file and set TURNSTILE_SECRET_KEY in .dev.vars or Worker Secrets.
+# TURNSTILE_SITE_KEY=
+# TURNSTILE_SECRET_KEY=
+# TURNSTILE_ALLOWED_HOSTNAMES=omew.wuyilingwei.com,localhost
+
 # Optional local self-management credentials. Overture supplies these as Worker
 # Secrets in production; never commit real values.
 # CF_ACCOUNT_ID=

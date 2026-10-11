@@ -56,6 +56,7 @@ import {
   type WebauthnRegChallengeClaims,
 } from "./types";
 import { isReservedUsername } from "./reserved-usernames";
+import { consumeActionToken, logOperationalEvent, requestRateLimited, requireTurnstile, sendAccountActionEmail, turnstileEnabled } from "./account-recovery";
 import {
   domainOfActor,
   generateInviteCode,
@@ -683,16 +684,27 @@ async function requireSession(request: Request, env: Env): Promise<SessionTokenC
   }
   const localpart = localpartOfActor(claims.actor);
   await clearExpiredGlobalBan(env, localpart);
-  const current = await env.DB.prepare("SELECT server_role, status, last_active_at FROM users WHERE localpart = ?")
+  const current = await env.DB.prepare("SELECT server_role, status, last_active_at, sessions_revoked_at FROM users WHERE localpart = ?")
     .bind(localpart)
-    .first<{ server_role: ServerRole; status: string; last_active_at: number | null }>();
+    .first<{ server_role: ServerRole; status: string; last_active_at: number | null; sessions_revoked_at: number | null }>();
   if (!current || current.status !== "active") return apiError(401, "AUTH_REQUIRED");
+  if (current.sessions_revoked_at !== null && (typeof claims.iat !== "number" || claims.iat <= current.sessions_revoked_at)) {
+    return apiError(401, "AUTH_REQUIRED");
+  }
   await touchLastActive(env, localpart, current.last_active_at);
   return { ...claims, server_role: current.server_role };
 }
 
 function localAuthenticationRejection(env: Env): Response | null {
   return getSsoConfig(env).mode === "required" ? apiError(403, "SSO_REQUIRED") : null;
+}
+
+function accountActionIp(request: Request): string {
+  return request.headers.get("CF-Connecting-IP") ?? "unknown";
+}
+
+async function accountActionTurnstile(request: Request, env: Env, body: Record<string, unknown>, action: string): Promise<boolean> {
+  return requireTurnstile(env, body.turnstile_token, new URL(request.url).hostname, action);
 }
 
 async function touchLastActive(env: Env, localpart: string, previous: number | null = null, now = Date.now()): Promise<void> {
@@ -914,8 +926,130 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
       sso_provider_name: sso.provider_name,
       sso_session_locked: sso.session_locked,
       sso_nickname_locked: sso.nickname_locked,
+      turnstile_site_key: turnstileEnabled(env) ? env.TURNSTILE_SITE_KEY : null,
       ...getInstanceBranding(env),
     });
+  }
+
+  if (method === "POST" && path === "/api/account/password-reset") {
+    const body = await readJsonBody(request);
+    if (!body) return apiError(413, "PAYLOAD_INVALID");
+    const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+    if (!isValidEmail(email)) return apiError(400, "EMAIL_INVALID");
+    if (!(await accountActionTurnstile(request, env, body, "password-reset"))) return apiError(400, "TURNSTILE_FAILED");
+    if (await requestRateLimited(env, "password_reset", [accountActionIp(request), email])) {
+      logOperationalEvent({ event: "account.password_reset_rate_limited" });
+      return json({ ok: true }, 202);
+    }
+
+    const matches = await env.DB.prepare(
+      "SELECT localpart FROM users WHERE lower(email) = ? AND email_verified = 1 AND status = 'active' AND pw_hash IS NOT NULL LIMIT 2",
+    ).bind(email).all<{ localpart: string }>();
+    const user = matches.results.length === 1 ? matches.results[0] : undefined;
+    try {
+      await sendAccountActionEmail(env, {
+        action: "password_reset",
+        localpart: user?.localpart ?? null,
+        email,
+        origin: new URL(request.url).origin,
+      });
+    } catch {
+      return apiError(503, "EMAIL_SEND_FAILED");
+    }
+    return json({ ok: true }, 202);
+  }
+
+  if (method === "POST" && path === "/api/account/password-reset/complete") {
+    const body = await readJsonBody(request);
+    if (!body) return apiError(413, "PAYLOAD_INVALID");
+    const token = typeof body.token === "string" ? body.token : "";
+    const password = typeof body.new_password === "string" ? body.new_password : "";
+    if (password.length < 8) return apiError(400, "PASSWORD_INVALID");
+    const action = await consumeActionToken(env, "password_reset", token);
+    if (!action?.localpart) return apiError(400, "RESET_TOKEN_INVALID");
+    const { hash, salt } = await hashPassword(password);
+    const revokedAt = Date.now() + 1;
+    const updated = await env.DB.prepare(
+      "UPDATE users SET pw_hash = ?, pw_salt = ?, sessions_revoked_at = ? WHERE localpart = ? AND lower(email) = ? AND email_verified = 1 AND status = 'active' AND pw_hash IS NOT NULL",
+    ).bind(hash, salt, revokedAt, action.localpart, action.email).run();
+    if (updated.meta.changes !== 1) return apiError(400, "RESET_TOKEN_INVALID");
+    await env.DB.prepare("UPDATE oidc_sessions SET revoked_at = ?, updated_at = ? WHERE localpart = ? AND revoked_at IS NULL")
+      .bind(nowS(), nowS(), action.localpart).run();
+    await broadcastGroupRevoke(env, [action.localpart]);
+    logOperationalEvent({ event: "account.password_reset_completed" });
+    return new Response(null, { status: 204, headers: cors() });
+  }
+
+  if (method === "POST" && path === "/api/account/email/verify") {
+    const body = await readJsonBody(request);
+    if (!body) return apiError(413, "PAYLOAD_INVALID");
+    const token = typeof body.token === "string" ? body.token : "";
+    const action = await consumeActionToken(env, "email_verification", token);
+    if (!action?.localpart) return apiError(400, "VERIFICATION_TOKEN_INVALID");
+    const updated = await env.DB.prepare(
+      "UPDATE users SET email_verified = 1 WHERE localpart = ? AND lower(email) = ? AND email_verified = 0 AND status = 'active'",
+    ).bind(action.localpart, action.email).run();
+    if (updated.meta.changes !== 1) return apiError(400, "VERIFICATION_TOKEN_INVALID");
+    await broadcastGroupRevoke(env, [action.localpart]);
+    logOperationalEvent({ event: "account.email_verified" });
+    return json({ ok: true, email: action.email });
+  }
+
+  if (method === "POST" && path === "/api/me/email") {
+    const actor = await requireActor(request, env);
+    if (!actor) return apiError(401, "AUTH_REQUIRED");
+    const body = await readJsonBody(request);
+    if (!body) return apiError(413, "PAYLOAD_INVALID");
+    const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+    if (!isValidEmail(email)) return apiError(400, "EMAIL_INVALID");
+    const localpart = localpartOfActor(actor);
+    const duplicate = await env.DB.prepare("SELECT localpart FROM users WHERE lower(email) = ? AND localpart <> ? LIMIT 1")
+      .bind(email, localpart).first();
+    if (duplicate) return apiError(409, "EMAIL_TAKEN");
+    const current = await env.DB.prepare("SELECT email, email_verified FROM users WHERE localpart = ?")
+      .bind(localpart).first<{ email: string | null; email_verified: number }>();
+    if (!current) return apiError(401, "AUTH_REQUIRED");
+    if (current.email?.toLowerCase() === email && current.email_verified === 1) return json({ ok: true, already_verified: true });
+    if (await requestRateLimited(env, "email_verification", [accountActionIp(request), email])) {
+      return apiError(429, "EMAIL_RATE_LIMITED");
+    }
+    try {
+      await sendAccountActionEmail(env, {
+        action: "email_verification",
+        localpart,
+        email,
+        origin: new URL(request.url).origin,
+      });
+    } catch {
+      return apiError(503, "EMAIL_SEND_FAILED");
+    }
+    await env.DB.prepare("UPDATE users SET email = ?, email_verified = 0 WHERE localpart = ?")
+      .bind(email, localpart).run();
+    return json({ ok: true, verification_required: true }, 202);
+  }
+
+  if (method === "POST" && path === "/api/account/email/resend") {
+    const actor = await requireActor(request, env);
+    if (!actor) return apiError(401, "AUTH_REQUIRED");
+    const localpart = localpartOfActor(actor);
+    const user = await env.DB.prepare("SELECT email, email_verified FROM users WHERE localpart = ?")
+      .bind(localpart).first<{ email: string | null; email_verified: number }>();
+    if (!user?.email) return apiError(400, "EMAIL_REQUIRED");
+    if (user.email_verified === 1) return json({ ok: true, already_verified: true });
+    if (await requestRateLimited(env, "email_verification", [accountActionIp(request), user.email])) {
+      return apiError(429, "EMAIL_RATE_LIMITED");
+    }
+    try {
+      await sendAccountActionEmail(env, {
+        action: "email_verification",
+        localpart,
+        email: user.email,
+        origin: new URL(request.url).origin,
+      });
+    } catch {
+      return apiError(503, "EMAIL_SEND_FAILED");
+    }
+    return json({ ok: true });
   }
 
   if (method === "GET" && path === "/api/auth/oidc/start") {
@@ -1067,6 +1201,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     if (rejected) return rejected;
     const body = await readJsonBody(request);
     if (!body) return apiError(413, "PAYLOAD_INVALID");
+    if (!(await accountActionTurnstile(request, env, body, "register"))) return apiError(400, "TURNSTILE_FAILED");
 
     const config = await getInstanceConfig(env);
     if (!config.allow_root) return apiError(403, "REGISTRATION_DISABLED");
@@ -1103,14 +1238,28 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     if (requiresEmail && !emailInput) return apiError(400, "EMAIL_INVALID");
     if (emailInput && !isValidEmail(emailInput)) return apiError(400, "EMAIL_INVALID");
     const email = emailInput || null;
+    if (email && await env.DB.prepare("SELECT localpart FROM users WHERE lower(email) = ? LIMIT 1").bind(email.toLowerCase()).first()) {
+      return apiError(409, "EMAIL_TAKEN");
+    }
 
     // v1 has no SMS channel; "phone" stays a valid root_requirements enum member
     // (reserved for a future release) but can never be satisfied today.
     if (requiresPhone) return apiError(400, "PHONE_UNSUPPORTED");
-
-    // TODO: once an Email Service binding is configured, send a verification email
-    // here and leave email_verified=0 until it's confirmed. Until then registration
-    // is never blocked on verification.
+    if (email) {
+      if (await requestRateLimited(env, "email_verification", [accountActionIp(request), email])) {
+        return apiError(429, "EMAIL_RATE_LIMITED");
+      }
+      try {
+        await sendAccountActionEmail(env, {
+          action: "email_verification",
+          localpart: username,
+          email,
+          origin: new URL(request.url).origin,
+        });
+      } catch {
+        return apiError(503, "EMAIL_SEND_FAILED");
+      }
+    }
 
     const { hash, salt } = await hashPassword(password);
     const actor = `@${username}:${instanceDomain(env)}`;
@@ -1177,7 +1326,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
       throw err;
     }
     const user = toPublicUser({ localpart: username, server_role: serverRole, email, email_verified: 0, avatar: null, cover: null, bio: null }, actor);
-    return json({ token, user, auth_source: "local" });
+    return json({ token, user, auth_source: "local", email_verification_required: Boolean(email) });
   }
 
   if (method === "POST" && path === "/api/login") {
@@ -4348,7 +4497,7 @@ function paginateMembers(members: MemberRow[], afterCursor: string | null): { pa
 async function issueSessionToken(actor: string, serverRole: ServerRole, authSource: AuthSource, env: Env): Promise<string> {
   const claims: SessionTokenClaims = {
     v: 1, typ: "session", actor, server_role: serverRole, auth_source: authSource,
-    exp: nowS() + SESSION_TOKEN_TTL_S, jti: newJti(),
+    iat: Date.now(), exp: nowS() + SESSION_TOKEN_TTL_S, jti: newJti(),
   };
   return signToken(claims, env.DEV_TOKEN_SECRET);
 }

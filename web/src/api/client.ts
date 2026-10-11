@@ -271,6 +271,31 @@ export const realApi = {
   register: (payload: RegisterPayload) =>
     request<AuthResponse>('/api/register', { method: 'POST', body: JSON.stringify(payload) }),
 
+  requestPasswordReset: (email: string, turnstileToken?: string) =>
+    request<{ ok: true }>('/api/account/password-reset', {
+      method: 'POST', body: JSON.stringify({ email, turnstile_token: turnstileToken }),
+    }),
+
+  completePasswordReset: (token: string, newPassword: string) =>
+    request<void>('/api/account/password-reset/complete', {
+      method: 'POST', body: JSON.stringify({ token, new_password: newPassword }),
+    }),
+
+  verifyAccountEmail: (token: string) =>
+    request<{ ok: true; email: string }>('/api/account/email/verify', {
+      method: 'POST', body: JSON.stringify({ token }),
+    }),
+
+  setAccountEmail: (token: string, email: string) =>
+    request<{ ok: true; verification_required?: boolean; already_verified?: boolean }>('/api/me/email', {
+      method: 'POST', headers: authHeaders(token), body: JSON.stringify({ email }),
+    }),
+
+  resendAccountVerification: (token: string) =>
+    request<{ ok: true; already_verified?: boolean }>('/api/account/email/resend', {
+      method: 'POST', headers: authHeaders(token),
+    }),
+
   login: (payload: LoginPayload) =>
     request<TotpLoginResult>('/api/login', { method: 'POST', body: JSON.stringify(payload) }),
 

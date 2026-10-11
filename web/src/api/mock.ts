@@ -834,6 +834,26 @@ export const mockApi = {
     throw new ApiRequestError('SSO_NOT_CONFIGURED', 503)
   },
 
+  async requestPasswordReset(_email: string, _turnstileToken?: string): Promise<{ ok: true }> {
+    return { ok: true }
+  },
+
+  async completePasswordReset(_token: string, _newPassword: string): Promise<void> {
+    throw new ApiRequestError('RESET_TOKEN_INVALID', 400)
+  },
+
+  async verifyAccountEmail(_token: string): Promise<{ ok: true; email: string }> {
+    return { ok: true, email: 'mock@example.com' }
+  },
+
+  async setAccountEmail(_token: string, _email: string): Promise<{ ok: true; verification_required?: boolean; already_verified?: boolean }> {
+    return { ok: true, verification_required: true }
+  },
+
+  async resendAccountVerification(_token: string): Promise<{ ok: true; already_verified?: boolean }> {
+    return { ok: true }
+  },
+
     async getInstanceConfig(): Promise<InstanceConfig> {
     return delay({
       instance_name: 'OMEW',
@@ -851,6 +871,7 @@ export const mockApi = {
       sso_provider_name: config.sso_provider_name,
       sso_session_locked: false,
       sso_nickname_locked: config.sso_mode !== 'disabled' && config.sso_nickname_locked,
+      turnstile_site_key: null,
       logo_url: null,
       emotes_enabled: true,
       builtin_emotes_enabled: true,

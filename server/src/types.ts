@@ -88,6 +88,7 @@ export interface SessionTokenClaims {
   auth_source: AuthSource;
   exp: number;
   jti: string;
+  iat?: number;
 }
 
 // m0-protocol §7.2a: TOTP second factor and WebAuthn passkey short-lived
