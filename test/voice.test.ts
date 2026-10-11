@@ -1,7 +1,9 @@
 import { env } from "cloudflare:test";
 import { jwtVerify } from "jose";
-import { beforeAll, describe, expect, it } from "vitest";
-import { apiRequest, ensureMigrated, sessionToken, TEST_SECRET } from "./helpers";
+import { beforeAll, describe, expect, it, vi } from "vitest";
+import { apiRequest, ensureMigrated, sessionToken } from "./helpers";
+import voiceRevocationMigration from "../server/migrations/0028_voice_revocation.sql?raw";
+import { retryVoiceRevocations, revokeVoiceParticipant } from "../server/src/voice";
 
 const LIVEKIT_API_KEY = "test-livekit-key";
 const LIVEKIT_API_SECRET = "test-livekit-secret-for-unit-tests";
@@ -24,6 +26,9 @@ async function voiceRoom(visibility: "public" | "private" = "public") {
 
 beforeAll(async () => {
   await ensureMigrated();
+  for (const statement of voiceRevocationMigration.split(";").map((part) => part.trim()).filter(Boolean)) {
+    await env.DB.prepare(statement).run();
+  }
   env.LIVEKIT_URL = "http://localhost:7880";
   env.LIVEKIT_API_KEY = LIVEKIT_API_KEY;
   env.LIVEKIT_API_SECRET = LIVEKIT_API_SECRET;
@@ -104,5 +109,49 @@ describe("LiveKit voice token route", () => {
 
     const noSession = await apiRequest(`/stronghold/${id}/rooms/general/voice-token`, { method: "POST" });
     expect(noSession.status).toBe(401);
+  });
+});
+
+describe("LiveKit voice revocation queue", () => {
+  it("persists API failures and retries with the original token revocation timestamp", async () => {
+    const { liveKitRoomName } = await import("../server/src/voice");
+    const roomRef = "voice-revoke-test/channel/general";
+    const actor = "@revoked:local";
+    const room = await liveKitRoomName(env, roomRef);
+    const attemptStartedAt = Math.floor(Date.now() / 1000);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ code: "unavailable", msg: "temporarily unavailable" }), {
+        status: 503,
+        headers: { "content-type": "application/json" },
+      }))
+      .mockResolvedValueOnce(new Response("{}", {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      await revokeVoiceParticipant(env, roomRef, actor);
+      const pending = await env.DB.prepare(
+        "SELECT job_key, revoke_token_ts, attempts, next_attempt_at FROM voice_revocations WHERE room_ref = ? AND actor = ?",
+      ).bind(roomRef, actor).first<{ job_key: string; revoke_token_ts: number; attempts: number; next_attempt_at: number }>();
+      expect(pending).not.toBeNull();
+      expect(pending?.attempts).toBe(1);
+      expect(pending?.revoke_token_ts).toBeGreaterThanOrEqual(Math.floor(Date.now() / 1000));
+      expect(pending?.next_attempt_at).toBeGreaterThanOrEqual(attemptStartedAt + 1);
+
+      await env.DB.prepare("UPDATE voice_revocations SET next_attempt_at = 0 WHERE job_key = ?")
+        .bind(pending!.job_key).run();
+      await retryVoiceRevocations(env);
+
+      expect(await env.DB.prepare("SELECT job_key FROM voice_revocations WHERE job_key = ?")
+        .bind(pending!.job_key).first()).toBeNull();
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const firstPayload = JSON.parse(String(fetchMock.mock.calls[0][1]?.body)) as { room: string; identity: string };
+      const retryPayload = JSON.parse(String(fetchMock.mock.calls[1][1]?.body)) as { revoke_token_ts?: string; revokeTokenTs?: string };
+      expect(BigInt(retryPayload.revoke_token_ts ?? retryPayload.revokeTokenTs!)).toBe(BigInt(pending!.revoke_token_ts));
+      expect(firstPayload).toMatchObject({ room, identity: actor });
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
