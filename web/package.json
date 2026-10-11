@@ -13,6 +13,7 @@
     "@noble/curves": "^2.3.0",
     "@noble/hashes": "^2.3.0",
     "@simplewebauthn/browser": "^13.3.0",
+    "livekit-client": "^2.22.4",
     "markdown-it": "^15.0.0",
     "qrcode": "^1.5.4",
     "vue": "^3.5.41"

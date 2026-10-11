@@ -304,10 +304,11 @@ function receive(raw_bytes, peer_ip):
 
 `voice.join` / `voice.leave` / `voice.peers` / `voice.signal` / `voice.token`
 
-- v1 **不实现任何媒体逻辑**,仅冻结帧形状与命名空间。
-- `voice.*` MUST NOT 进入联邦链路,MUST NOT 落库,MUST NOT 占用 seq,MUST NOT 写入去重表。它们是房间 WebSocket 上的瞬态帧。
-- `voice.signal` payload `{to, sdp?, candidate?}`;`voice.peers` payload `{room, peers: [actor]}`;`voice.token` payload 由后期接入的 SFU 决定,v1 MUST 返回 `OMEW_NOT_IMPLEMENTED`。
-- Worker MUST NOT 中转媒体流。
+- Web 客户端通过 LiveKit SDK 连接房间 SFU；`voice.join`、`voice.leave`、`voice.peers`、`voice.signal` 是保留的协议名,不是 OMEW 房间 WebSocket 帧。
+- 已登录成员可对 `POST /stronghold/{id}/rooms/{resId}/voice-token` 请求临时凭据。服务端 MUST 每次重新校验有效 Session、当前据点成员与角色、封禁状态、私密据点成员资格及受限频道权限；目标 MUST 是含 `voice` capability 的 `channel`。
+- 响应为 `{token, url, room, exp, can_publish}`。LiveKit grant MUST 限定到单一房间和当前 actor 身份,并 MUST 允许订阅；`can_publish` MUST 按现行角色与 `DENY_CHANNEL_SPEAK` 决定。拒绝发言的成员可收听但 MUST NOT 发布麦克风音轨。
+- LiveKit access token 的有效期 MUST 不超过 120 秒。权限撤销时,服务端 MUST 移除在线参与者并撤销其在撤销时点前签发的 token,以阻止使用旧凭据重连。
+- `voice.*` 状态 MUST NOT 进入联邦链路、应用数据库或消息去重表,MUST NOT 占用 seq。客户端媒体直接流向配置的 LiveKit SFU；Worker MUST NOT 中转或持久化媒体流。
 
 ### 3.8 Mew 事件词表裁剪对照
 

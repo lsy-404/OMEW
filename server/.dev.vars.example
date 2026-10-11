@@ -1,4 +1,7 @@
 DEV_TOKEN_SECRET=change-me-to-a-random-value
+LIVEKIT_URL=http://localhost:7880
+LIVEKIT_API_KEY=devkey
+LIVEKIT_API_SECRET=secret
 
 # Optional local self-management credentials. Overture supplies these as Worker
 # Secrets in production; never commit real values.

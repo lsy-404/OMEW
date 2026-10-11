@@ -40,6 +40,7 @@ watch(selectedNodeId, loadSections)
 const editingId = ref<string | null>(null)
 const editingName = ref('')
 const editingDescription = ref('')
+const editingVoiceEnabled = ref(false)
 const editError = ref('')
 const descError = ref('')
 
@@ -47,6 +48,7 @@ function startEdit(room: RoomSummary) {
   editingId.value = room.id
   editingName.value = room.name
   editingDescription.value = room.description ?? ''
+  editingVoiceEnabled.value = room.capabilities.includes('voice')
   editError.value = ''
   descError.value = ''
 }
@@ -67,6 +69,7 @@ async function saveEdit(room: RoomSummary) {
     await api.patchRoom(auth.token.value, selectedNodeId.value, room.id, {
       name: editingName.value.trim(),
       description: editingDescription.value.trim() || null,
+      capabilities: [...room.capabilities.filter((capability) => capability !== 'voice'), ...(editingVoiceEnabled.value ? ['voice'] : [])],
     })
     await Promise.all([loadStrongholds(true), loadSections()])
     editingId.value = null
@@ -162,6 +165,7 @@ async function remove(room: RoomSummary) {
 const newName = ref('')
 const createError = ref('')
 const creating = ref(false)
+const createVoiceEnabled = ref(false)
 
 async function create() {
   if (!auth.token.value) return
@@ -169,9 +173,14 @@ async function create() {
   if (createError.value) return
   creating.value = true
   try {
-    await api.createRoom(auth.token.value, selectedNodeId.value, { name: newName.value.trim(), type: props.type })
+    await api.createRoom(auth.token.value, selectedNodeId.value, {
+      name: newName.value.trim(),
+      type: props.type,
+      capabilities: ['text', ...(props.type === 'channel' && createVoiceEnabled.value ? ['voice'] : [])],
+    })
     await Promise.all([loadStrongholds(true), loadSections()])
     newName.value = ''
+    createVoiceEnabled.value = false
   } catch {
     createError.value = '创建失败，请稍后重试'
   } finally {
@@ -210,6 +219,10 @@ async function create() {
             <p v-if="editError" class="field__error">{{ editError }}</p>
             <input v-model="editingDescription" type="text" maxlength="64" :placeholder="`${roomLabel}描述（可选，≤64 字）`" @keyup.enter="saveEdit(room)" @keyup.escape="cancelEdit" />
             <p v-if="descError" class="field__error">{{ descError }}</p>
+            <label v-if="props.type === 'channel'" class="room-capability">
+              <input v-model="editingVoiceEnabled" type="checkbox" />
+              启用语音
+            </label>
           </div>
           <div class="section-row__actions">
             <WinButton Style="AccentButtonStyle" :IsEnabled="!busy" @click="saveEdit(room)">保存</WinButton>
@@ -248,6 +261,10 @@ async function create() {
       <div class="field section-create__field">
         <input v-model="newName" type="text" maxlength="32" :placeholder="`新建${roomLabel}名称`" @keyup.enter="create" />
         <p v-if="createError" class="field__error">{{ createError }}</p>
+        <label v-if="props.type === 'channel'" class="room-capability">
+          <input v-model="createVoiceEnabled" type="checkbox" />
+          启用语音
+        </label>
       </div>
       <WinButton Style="DefaultButtonStyle" :IsEnabled="!creating" @click="create">
         {{ creating ? '创建中…' : `新建${roomLabel}` }}
@@ -372,6 +389,15 @@ async function create() {
   gap: 0.6rem;
   padding-top: 0.4rem;
   border-top: 1px solid var(--card-stroke);
+}
+
+.room-capability {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: fit-content;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
 }
 
 .section-create__field {

@@ -6,7 +6,7 @@ Open-source, self-hostable community platform built around strongholds, realtime
 
 ## OMEW 1.0.0
 
-首个正式版本已经完成单实例社区闭环：公开首页与据点目录、账号与通行密钥、实时聊天、Markdown 帖子、图片与表情、成员资料、私信、权限组、封禁和临时功能限制。
+首个正式版本已经完成单实例社区闭环：公开首页与据点目录、账号与通行密钥、实时聊天、LiveKit 语音频道、Markdown 帖子、图片与表情、成员资料、私信、权限组、封禁和临时功能限制。
 
 推荐通过 [Overture 在线部署器](https://overture.lsy-demo.workers.dev/?src=lsy-404%2FOMEW) 安装。链接已经预选 `lsy-404/OMEW`，无需本地工具链；安装器会列出将创建的 Worker、D1、R2、Durable Objects 与所需权限，再把 OMEW 部署到你自己的 Cloudflare 账户。
 
@@ -28,10 +28,11 @@ SSO 首次登录会导入提供方的 `nickname`（未提供时使用 `name` 或
 
 - [项目书 v0.2](docs/proposal-v0.2.md) —— 设计文档(架构、数据模型、联邦、成本)
 - [M0 协议规范草案](docs/m0-protocol-draft.md) —— 事件信封、签名、联邦会话、迁移协议
+- [LiveKit 语音部署](docs/voice-sfu.md) —— 本地开发、自部署 SFU、Worker 配置与真实音轨验收
 
 ## 状态 / Status
 
-1.0.0 单实例核心可用；M0 联邦协议草案完成，跨实例联邦、归档搜索与语音仍属于后续里程碑。
+1.0.0 单实例核心可用；M0 联邦协议草案完成，LiveKit 语音已接入；跨实例联邦与归档搜索仍属于后续里程碑。
 
 ## License
 
