@@ -1,5 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { verifyToken } from "./auth";
+import { newEvent, queueDelivery } from "./federation";
+import { Envelope, JsonObject, ProtocolError, object } from "./federation-codec";
 import { getInstanceBranding } from "./config";
 import { markdownPreview } from "./markdown-preview";
 import { featurePaused, type EditConfigSnapshot, type FeatureRestrictionSnapshot, type MemberRevokePayload } from "./stronghold-do";
@@ -116,6 +118,9 @@ export class RoomDO extends DurableObject<Env> {
     // archiving rows never lets seq regress.
     sql.exec(`
       CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS local_event (id TEXT PRIMARY KEY,seq INTEGER UNIQUE,room TEXT NOT NULL,actor TEXT,frame TEXT NOT NULL,envelope TEXT,delivered INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS federation_state (key TEXT PRIMARY KEY,value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS signed_event_archive (seq_start INTEGER PRIMARY KEY,seq_end INTEGER NOT NULL,r2_key TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS item (
         seq INTEGER PRIMARY KEY,
         parent_seq INTEGER, root_seq INTEGER,
@@ -533,12 +538,10 @@ export class RoomDO extends DurableObject<Env> {
       this.scheduleBump(rootSeq);
     }
 
+    const createdFrame = { type: "item.create", seq, parent_seq: parentSeq, root_seq: rootSeq, actor: attachment.actor, kind, ts, body: finalBody, client_id: clientId };
+    const envelope = await this.appendSignedEvent(attachment.room, attachment.actor, createdFrame);
     this.sendAck(ws, { status: "ok", client_id: clientId, seq });
-    this.enqueueBroadcast(ws, {
-      type: "item.create",
-      seq, parent_seq: parentSeq, root_seq: rootSeq,
-      actor: attachment.actor, kind, ts, body: finalBody,
-    });
+    this.enqueueBroadcast(ws, { ...createdFrame, envelope });
     this.reportTip(attachment.room, seq);
   }
 
@@ -711,7 +714,9 @@ export class RoomDO extends DurableObject<Env> {
       targetSeq, seq, bodyJson, editedAt
     );
 
-    this.enqueueBroadcast(excludeWs, { type: "item.update", seq, target_seq: targetSeq, body: finalBody, edited_at: editedAt });
+    const editedFrame = { type: "item.update", seq, target_seq: targetSeq, body: finalBody, edited_at: editedAt };
+    const envelope = await this.appendSignedEvent(roomRef, actor, editedFrame);
+    this.enqueueBroadcast(excludeWs, { ...editedFrame, envelope });
     this.reportTip(roomRef, seq);
     return { ok: true, seq };
   }
@@ -771,9 +776,109 @@ export class RoomDO extends DurableObject<Env> {
       targetSeq, actor, ts, reason ?? null
     );
 
-    this.enqueueBroadcast(excludeWs, { type: "item.delete", seq, target_seq: targetSeq, reason, by_role: byRole });
+    const deletedFrame = { type: "item.delete", seq, target_seq: targetSeq, reason, by_role: byRole };
+    const envelope = await this.appendSignedEvent(roomRef, actor, deletedFrame);
+    this.enqueueBroadcast(excludeWs, { ...deletedFrame, envelope });
     this.reportTip(roomRef, seq);
     return { ok: true, seq };
+  }
+
+  private cleanSigned(value: unknown): unknown {
+    if (Array.isArray(value)) return value.filter(entry => entry !== null && entry !== undefined).map(entry => this.cleanSigned(entry));
+    if (object(value)) return Object.fromEntries(Object.entries(value).filter(([,entry]) => entry !== null && entry !== undefined).map(([key,entry]) => [key,this.cleanSigned(entry)]));
+    return typeof value === "string" ? value.normalize("NFC") : value;
+  }
+
+  private async scheduleFederationAlarm(): Promise<void> {
+    const current = await this.ctx.storage.getAlarm();
+    if (current === null || current > Date.now() + 1000) await this.ctx.storage.setAlarm(Date.now() + 1000);
+  }
+
+  private async appendSignedEvent(room: string, actor: string | null, frame: Record<string,unknown>): Promise<Envelope> {
+    const seq = typeof frame.seq === "number" ? frame.seq : null;
+    if (!this.ctx.storage.sql.exec("SELECT key FROM federation_state WHERE key='baseline'").toArray().length) {
+      this.ctx.storage.sql.exec("INSERT INTO federation_state(key,value) VALUES ('baseline',?)", String(seq ? seq - 1 : this.latestSequence()));
+    }
+    const {type,seq: _seq,actor: _actor,ts: _ts,...payload} = frame;
+    const clean = this.cleanSigned({ ...payload, ...(type === "item.create" && typeof frame.ts === "number" ? { created_at: frame.ts } : {}) }) as JsonObject;
+    const id = crypto.randomUUID();
+    this.ctx.storage.sql.exec("INSERT OR IGNORE INTO local_event(id,seq,room,actor,frame,created_at) VALUES (?,?,?,?,?,?)",id,seq,room,actor,JSON.stringify({type,payload:clean}),Date.now());
+    const row = seq === null ? this.ctx.storage.sql.exec<{id:string}>("SELECT id FROM local_event WHERE id=?",id).one() : this.ctx.storage.sql.exec<{id:string}>("SELECT id FROM local_event WHERE seq=?",seq).one();
+    await this.scheduleFederationAlarm();
+    return this.signLocalEvent(row.id);
+  }
+
+  private async signLocalEvent(id: string): Promise<Envelope> {
+    const row = this.ctx.storage.sql.exec<{id:string;seq:number|null;room:string;actor:string|null;frame:string;envelope:string|null}>("SELECT * FROM local_event WHERE id=?",id).one();
+    if (row.envelope) return JSON.parse(row.envelope) as Envelope;
+    const frame = JSON.parse(row.frame) as {type:string;payload:JsonObject};
+    const event = await newEvent(this.env,frame.type,frame.payload,{room:row.room,...(row.actor ? {actor:row.actor}:{}),...(row.seq !== null ? {seq:row.seq}:{})});
+    this.ctx.storage.sql.exec("UPDATE local_event SET envelope=? WHERE id=?",JSON.stringify(event),id);
+    return event;
+  }
+
+  private latestSequence(): number {
+    return this.ctx.storage.sql.exec<{value:number}>("SELECT value FROM meta WHERE key='next_seq'").one().value - 1;
+  }
+
+  async registerSubscription(peer: string, expiresAt: number): Promise<number> {
+    this.ctx.storage.sql.exec("INSERT INTO subscription(peer,expires_at) VALUES (?,?) ON CONFLICT(peer) DO UPDATE SET expires_at=excluded.expires_at",peer,expiresAt);
+    return this.latestSequence();
+  }
+
+  async removeSubscription(peer: string): Promise<void> {
+    this.ctx.storage.sql.exec("DELETE FROM subscription WHERE peer=?",peer);
+  }
+
+  async runFederationAlarm(): Promise<void> {
+    const rows = this.ctx.storage.sql.exec<{id:string;room:string}>("SELECT id,room FROM local_event WHERE delivered=0 ORDER BY created_at LIMIT 50").toArray();
+    for (const row of rows) {
+      const event = await this.signLocalEvent(row.id);
+      const [id,,resId] = row.room.split("/");
+      const stronghold = this.env.STRONGHOLD_DO.getByName(id!);
+      const [config,room] = await Promise.all([stronghold.getConfig(),stronghold.getRoom(resId!)]);
+      if (config?.visibility === "public" && room && !room.restricted && !room.archived) {
+        const peers = this.ctx.storage.sql.exec<{peer:string}>("SELECT peer FROM subscription WHERE expires_at>?",Date.now()).toArray();
+        for (const peer of peers) await queueDelivery(this.env,peer.peer,event);
+      }
+      this.ctx.storage.sql.exec("UPDATE local_event SET delivered=1 WHERE id=?",row.id);
+    }
+    await this.archiveSignedEvents();
+    if (this.ctx.storage.sql.exec("SELECT id FROM local_event WHERE delivered=0 LIMIT 1").toArray().length) await this.scheduleFederationAlarm();
+    this.ctx.storage.sql.exec("DELETE FROM local_event WHERE seq IS NULL AND delivered=1 AND created_at<?",Date.now()-86400000);
+  }
+
+  private async archiveSignedEvents(): Promise<void> {
+    const rows = this.ctx.storage.sql.exec<{seq:number;room:string;envelope:string}>("SELECT seq,room,envelope FROM local_event WHERE seq IS NOT NULL AND delivered=1 AND envelope IS NOT NULL AND seq<? ORDER BY seq LIMIT 1000",this.latestSequence()-1000).toArray();
+    if (!rows.length) return;
+    const start = rows[0]!.seq; const end = rows.at(-1)!.seq;
+    const key = `signed-events/${rows[0]!.room}/${start}-${end}.json.gz`;
+    const stream = new Blob([JSON.stringify(rows.map(row => JSON.parse(row.envelope)))]).stream().pipeThrough(new CompressionStream("gzip"));
+    await this.env.MEDIA.put(key,stream,{httpMetadata:{contentType:"application/json",contentEncoding:"gzip"}});
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec("INSERT OR IGNORE INTO signed_event_archive(seq_start,seq_end,r2_key) VALUES (?,?,?)",start,end,key);
+      this.ctx.storage.sql.exec("DELETE FROM local_event WHERE seq>=? AND seq<=? AND delivered=1",start,end);
+    });
+  }
+
+  async getFederationHistory(room: string, after: number, before: number | null, limit: number): Promise<JsonObject> {
+    const baseline = Number(this.ctx.storage.sql.exec<{value:string}>("SELECT value FROM federation_state WHERE key='baseline'").toArray()[0]?.value ?? this.latestSequence());
+    const rows = this.ctx.storage.sql.exec<{envelope:string|null}>("SELECT envelope FROM local_event WHERE seq>? AND seq<? ORDER BY seq LIMIT ?",Math.max(after,baseline),before ?? Number.MAX_SAFE_INTEGER,limit).toArray();
+    const events: Envelope[] = rows.filter(row => row.envelope).map(row => JSON.parse(row.envelope!) as Envelope);
+    const archives = this.ctx.storage.sql.exec<{r2_key:string}>("SELECT r2_key FROM signed_event_archive WHERE seq_end>? AND seq_start<? ORDER BY seq_start LIMIT 4",after,before ?? Number.MAX_SAFE_INTEGER).toArray();
+    for (const archive of archives) {
+      const stored = await this.env.MEDIA.get(archive.r2_key);
+      if (!stored?.body) throw new ProtocolError(503,"OMEW_SEQ_GAP");
+      const body = await new Response(stored.body.pipeThrough(new DecompressionStream("gzip"))).json() as Envelope[];
+      events.push(...body.filter(event => event.seq!>after && (before===null || event.seq!<before)));
+    }
+    const selected = events.sort((a,b) => a.seq!-b.seq!).slice(0,limit);
+    return {room,origin:instanceDomain(this.env),latest_seq:this.latestSequence(),baseline,events:selected,...(after<baseline ? {snapshot:this.cleanSigned(await this.getHistory(null,200))}: {})};
+  }
+
+  async alarm(): Promise<void> {
+    try { await this.runFederationAlarm(); }
+    catch (error) { console.error(JSON.stringify({level:"error",event:"room.federation_alarm",error:String(error)}));await this.ctx.storage.setAlarm(Date.now()+60000); }
   }
 
   // S4.4: RoomDO -> StrongholdDO after each commit; fire-and-forget, never blocks

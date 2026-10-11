@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { verifyToken } from "./auth";
 import { synthesizeEffectivePermissions, type EffectivePermissions, type ServerGroupPermInput } from "./permissions";
-import { typeToKind, type Role, type RoomType, type StrongholdTokenClaims } from "./types";
+import { instanceDomain, typeToKind, type Role, type RoomType, type StrongholdTokenClaims } from "./types";
 import { domainOfActor, localpartOfActor } from "./users";
 
 // proposal S4.1/S4.4: stronghold config + capability rules + authoritative member
@@ -194,6 +194,7 @@ export class StrongholdDO extends DurableObject<Env> {
         deny INTEGER NOT NULL DEFAULT 0, restricted INTEGER NOT NULL DEFAULT 0,
         banned_at INTEGER, expires_at INTEGER, application_state TEXT NOT NULL DEFAULT 'approved', joined_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS member_migration (old_actor TEXT PRIMARY KEY,new_actor TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS tip (
         room_ref TEXT PRIMARY KEY, latest_seq INTEGER NOT NULL, ts INTEGER NOT NULL
       );
@@ -652,7 +653,7 @@ export class StrongholdDO extends DurableObject<Env> {
   // actor shows up, then serve the row as if nothing happened.
   private adoptLegacyActor(actor: string): MemberRow | null {
     const m = /^@([^:]+):(.+)$/.exec(actor);
-    if (!m || m[2] === "local") return null;
+    if (!m || m[2] === "local" || m[2] !== instanceDomain(this.env)) return null;
     const legacy = `@${m[1]}:local`;
     const rows = this.ctx.storage.sql.exec<MemberRow>("SELECT * FROM member WHERE actor = ?", legacy).toArray();
     if (!rows[0]) return null;
@@ -661,6 +662,25 @@ export class StrongholdDO extends DurableObject<Env> {
     sql.exec("UPDATE ban SET actor = ? WHERE actor = ?", actor, legacy);
     sql.exec("UPDATE config SET owner_actor = ? WHERE owner_actor = ?", actor, legacy);
     return { ...rows[0], actor };
+  }
+
+  async migrateMember(oldActor: string, newActor: string): Promise<void> {
+    const existing = this.ctx.storage.sql.exec<MemberRow>("SELECT * FROM member WHERE actor=?", oldActor).toArray()[0];
+    const migration = this.ctx.storage.sql.exec<{new_actor:string}>("SELECT new_actor FROM member_migration WHERE old_actor=?",oldActor).toArray()[0];
+    if (!existing && migration?.new_actor!==newActor) return;
+    if (existing && this.ctx.storage.sql.exec("SELECT actor FROM member WHERE actor=?", newActor).toArray().length) throw new Error("OMEW_MIGRATION_CONFLICT");
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec("INSERT OR IGNORE INTO member_migration(old_actor,new_actor) VALUES (?,?)",oldActor,newActor);
+      this.ctx.storage.sql.exec("UPDATE member SET actor=? WHERE actor=?", newActor, oldActor);
+      this.ctx.storage.sql.exec("UPDATE ban SET actor=? WHERE actor=?", newActor, oldActor);
+      this.ctx.storage.sql.exec("UPDATE config SET owner_actor=? WHERE owner_actor=?", newActor, oldActor);
+    });
+    await this.env.DB.batch([
+      this.env.DB.prepare("DELETE FROM stronghold_member_index WHERE actor=? AND stronghold_id=?").bind(oldActor,this.selfId),
+      this.env.DB.prepare("INSERT OR IGNORE INTO stronghold_member_index(actor,stronghold_id) VALUES (?,?)").bind(newActor,this.selfId),
+      this.env.DB.prepare("DELETE FROM guest_member_state WHERE actor=? AND stronghold_id=?").bind(oldActor,this.selfId),
+    ]);
+    await this.pushRevokeToRooms({actor:oldActor,scope:this.selfId,effect:"close"});
   }
 
   async listMembers(): Promise<MemberRow[]> {

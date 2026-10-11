@@ -70,7 +70,7 @@ export interface StrongholdTokenClaims {
 // server_owner is unique (the instance operator); server_admin is appointable
 // by server_owner. Neither propagates over federation.
 export type ServerRole = "owner" | "admin" | "user";
-export type AuthSource = "local" | "sso";
+export type AuthSource = "local" | "sso" | "federation";
 export type SsoMode = "disabled" | "optional" | "required";
 export type InstanceMode = "multi" | "single";
 
@@ -80,6 +80,7 @@ export type InstanceMode = "multi" | "single";
 // re-resolves local users' current role from D1 before every authorization
 // decision, so a demotion takes effect immediately.
 export interface SessionTokenClaims {
+  iat?: number;
   v: 1;
   typ: "session";
   actor: string;

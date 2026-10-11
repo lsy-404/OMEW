@@ -6,6 +6,7 @@ import { useInstanceConfig } from '../composables/useInstanceConfig'
 import { useStronghold } from '../composables/useStronghold'
 import CreateStrongholdCard from './CreateStrongholdCard.vue'
 import DirectoryModal from './DirectoryModal.vue'
+import FederationPanel from './FederationPanel.vue'
 import AppIcon from './icons/AppIcon.vue'
 
 const auth = useAuth()
@@ -15,6 +16,7 @@ const instanceName = computed(() => instanceConfig.value?.instance_name || 'OMEW
 const logoSrc = computed(() => instanceConfig.value?.logo_url || (instanceConfig.value?.art_assets_enabled !== false ? '/favicon.svg' : null))
 const showCreate = ref(false)
 const showDirectory = ref(false)
+const showFederation = ref(false)
 
 function onCreated() {
   showCreate.value = false
@@ -63,6 +65,7 @@ function handleLogoClick(event: MouseEvent) {
           <AppIcon name="add" :size="18" />
         </button>
       </li>
+      <li v-if="auth.isAuthenticated.value"><button class="node-rail__item node-rail__item--add" type="button" title="实例互联与账号迁移" aria-label="实例互联与账号迁移" @click="showFederation = true">↔</button></li>
     </ul>
 
     <Teleport to="body">
@@ -74,6 +77,7 @@ function handleLogoClick(event: MouseEvent) {
       </div>
     </Teleport>
 
+    <FederationPanel :open="showFederation" @close="showFederation = false" />
     <DirectoryModal :open="showDirectory" @close="showDirectory = false" />
   </nav>
 </template>

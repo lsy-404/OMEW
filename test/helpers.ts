@@ -26,6 +26,7 @@ import migration0020Bio from "../server/migrations/0020_user_bio.sql?raw";
 import migration0021Messaging from "../server/migrations/0021_direct_messages_blocks.sql?raw";
 import migration0022Oidc from "../server/migrations/0022_oidc_sso.sql?raw";
 import migration0023OidcSessions from "../server/migrations/0023_oidc_sessions.sql?raw";
+import migration0025Federation from "../server/migrations/0025_federation.sql?raw";
 import migration0024OidcUsername from "../server/migrations/0024_oidc_username.sql?raw";
 
 // Must match vitest.config.ts's miniflare.bindings.DEV_TOKEN_SECRET.
@@ -45,6 +46,8 @@ function splitStatements(sql: string): string[] {
 }
 
 export async function ensureMigrated(): Promise<void> {
+  const federationSchema = await env.DB.prepare("SELECT name FROM sqlite_master WHERE name='own_signing_keys'").first();
+  if (!federationSchema) await env.DB.batch(splitStatements(migration0025Federation).map(statement => env.DB.prepare(statement)));
   // Existing API fixtures create temporary strongholds freely; production's
   // deployment default is restricted and policy tests override this explicitly.
   env.STRONGHOLD_CREATION = "open";
@@ -178,6 +181,7 @@ export async function connectRoom(
   role: Role = "owner",
   deny = 0
 ): Promise<{ ws: WebSocket; stub: DurableObjectStub<import("../server/src/room-do").RoomDO> }> {
+  await ensureMigrated();
   const claims: RoomTokenClaims = {
     v: 1,
     typ: "room",

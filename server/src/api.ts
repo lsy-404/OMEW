@@ -12,7 +12,9 @@ import type {
 } from "@simplewebauthn/server";
 import { base64UrlDecode, base64UrlEncode, dummyPasswordFields, hashPassword, newJti, signToken, verifyPassword, verifyToken } from "./auth";
 import { getInstanceBranding, getInstanceConfig, getSsoConfig, isValidOidcIssuer } from "./config";
-import { handleInbox } from "./inbox";
+import { federationRoutes } from "./federation-routes";
+import { failure as protocolFailure, ProtocolError } from "./federation-codec";
+import { consumeDeadLetters, consumeFederationQueue, runFederationMaintenance, validGuestSession, type Delivery } from "./federation";
 import {
   beginOidcAuthorization,
   clearOidcTransactionCookie,
@@ -482,7 +484,7 @@ function isAllowedEmbeddedDocument(request: Request, embedOrigin: string): boole
 }
 
 function isDynamicPath(path: string): boolean {
-  return path.startsWith("/api/") || path === "/inbox" || path.startsWith("/inbox/") || path === "/stronghold" || path.startsWith("/stronghold/") || path === "/media" || path.startsWith("/media/");
+  return path.startsWith("/.well-known/openmew/") || path.startsWith("/federation/") || path.startsWith("/migration/") || path.startsWith("/rooms/") || path.startsWith("/api/") || path === "/inbox" || path.startsWith("/inbox/") || path === "/stronghold" || path.startsWith("/stronghold/") || path === "/media" || path.startsWith("/media/");
 }
 
 function embedOnlyRejection(request: Request, env: Env, url: URL): Response | null {
@@ -513,7 +515,7 @@ function cors(): HeadersInit {
   return {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, OMEW-Origin",
   };
 }
 
@@ -651,9 +653,16 @@ async function requireSession(request: Request, env: Env): Promise<SessionTokenC
   const header = request.headers.get("Authorization");
   if (!header?.startsWith("Bearer ")) return apiError(401, "AUTH_REQUIRED");
   const claims = await verifyToken<SessionTokenClaims>(header.slice(7), env.DEV_TOKEN_SECRET);
-  if (!claims || claims.typ !== "session" || (claims.auth_source !== "local" && claims.auth_source !== "sso")) {
+  if (!claims || claims.typ !== "session" || (claims.auth_source !== "local" && claims.auth_source !== "sso" && claims.auth_source !== "federation")) {
     return apiError(401, "AUTH_REQUIRED");
   }
+  if (domainOfActor(claims.actor) !== instanceDomain(env)) {
+    if (!await validGuestSession(env,claims)) return apiError(401,"AUTH_REQUIRED");
+    const path=new URL(request.url).pathname;
+    if (path.startsWith("/api/me/") && path!=="/api/me/strongholds" && path!=="/api/me/storage") return apiError(403,"HOME_ACCOUNT_REQUIRED");
+    return { ...claims, server_role: "user" };
+  }
+  if (claims.auth_source === "federation") return apiError(401,"AUTH_REQUIRED");
   const sso = getSsoConfig(env);
   if (sso.mode === "required") {
     if (!sso.configured) return apiError(503, "SSO_NOT_CONFIGURED");
@@ -668,9 +677,6 @@ async function requireSession(request: Request, env: Env): Promise<SessionTokenC
     } catch (error) {
       if (!/no such table/i.test(error instanceof Error ? error.message : String(error))) throw error;
     }
-  }
-  if (domainOfActor(claims.actor) !== instanceDomain(env)) {
-    return { ...claims, server_role: "user" };
   }
   const localpart = localpartOfActor(claims.actor);
   await clearExpiredGlobalBan(env, localpart);
@@ -835,16 +841,20 @@ export default {
       return new Response(null, { headers: cors() });
     }
 
-    if (url.pathname === "/inbox" || url.pathname.startsWith("/inbox/")) {
-      return handleInbox(request, env);
-    }
-
     try {
       return await route(request, env, url);
     } catch (err) {
+      if (err instanceof ProtocolError) return protocolFailure(err);
       console.error(JSON.stringify({ level: "error", message: "unhandled api error", error: String(err) }));
       return errorResponse(500, "OMEW_INTERNAL", "internal error");
     }
+  },
+  async queue(batch: MessageBatch<Delivery>, env: Env): Promise<void> {
+    if (batch.queue.endsWith("-dead")) await consumeDeadLetters(batch, env);
+    else await consumeFederationQueue(batch, env);
+  },
+  async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+    await runFederationMaintenance(env);
   },
 };
 
@@ -852,6 +862,16 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
   env = withRequestInstanceDomain(env, url.hostname);
   const path = url.pathname;
   const method = request.method;
+  if (/^\/(?:\.well-known\/openmew|federation|migration|rooms)(?:\/|$)/.test(path) || path === "/inbox" || /^\/api\/(?:federation|admin\/federation|me\/migration|me\/links)(?:\/|$)/.test(path)) {
+    let session: SessionTokenClaims | null = null;
+    if (request.headers.get("Authorization")?.startsWith("Bearer ")) {
+      const resolved = await requireSession(request, env);
+      if (resolved instanceof Response) return resolved;
+      session = resolved;
+    }
+    const result = await federationRoutes(request, env, session);
+    if (result) return result;
+  }
   const instanceConfig = getInstanceConfig(env);
   if (instanceConfig.instance_mode === "single" && !instanceConfig.root_stronghold && !ROOT_SETUP_PATHS.has(path)) {
     return apiError(503, "INSTANCE_ROOT_NOT_CONFIGURED");
@@ -2307,24 +2327,6 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     }
 
     return json({ pack: { id: packId, name: packName, emotes: imported }, skipped }, 201);
-  }
-
-  // ---- federation session (m0-protocol S7.2) - trust-list gate only, M6 does the rest ----
-
-  if (method === "POST" && path === "/federation/session") {
-    const body = await readJsonBody(request);
-    if (!body) return apiError(413, "PAYLOAD_INVALID");
-    // §7.1: the assertion's `iss` is the requesting identity server's domain.
-    const iss = typeof body.iss === "string" ? body.iss : "";
-    if (!iss) return apiError(400, "MALFORMED");
-
-    const config = await getInstanceConfig(env);
-    if (!isOriginTrusted(config, iss)) return apiError(403, "ORIGIN_NOT_TRUSTED");
-
-    // Trusted origin: assertion signature/aud/jti/exp verification, guest identity
-    // upsert and session issuance (§7.1-7.3) are M6 scope. Shape exists (same
-    // placeholder convention as inbox.ts's 501) - only the trust-list gate is real.
-    return apiError(501, "NOT_IMPLEMENTED");
   }
 
   // ---- stronghold CRUD ----------------------------------------------------------

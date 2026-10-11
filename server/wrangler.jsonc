@@ -59,6 +59,14 @@
   "r2_buckets": [
     { "binding": "MEDIA", "bucket_name": "omew-media" }
   ],
+  "queues": {
+    "producers": [{ "binding": "FEDERATION_OUT", "queue": "omew-federation" }, { "binding": "FEDERATION_DEAD", "queue": "omew-federation-dead" }],
+    "consumers": [
+      { "queue": "omew-federation", "max_batch_size": 20, "max_retries": 8, "dead_letter_queue": "omew-federation-dead" },
+      { "queue": "omew-federation-dead", "max_batch_size": 20 }
+    ]
+  },
+  "triggers": { "crons": ["*/5 * * * *"] },
   "assets": {
     "directory": "../web/dist",
     "binding": "ASSETS",
@@ -66,7 +74,7 @@
     // every worker-served prefix must be listed here: anything missing is
     // swallowed by the SPA fallback above and comes back as index.html.
     // Keep in sync with web/vite.config.ts's dev proxy.
-    "run_worker_first": ["/api/*", "/federation/*", "/stronghold", "/stronghold/*", "/inbox", "/inbox/*", "/media/*"]
+    "run_worker_first": ["/api/*", "/federation/*", "/stronghold", "/stronghold/*", "/inbox", "/inbox/*", "/media/*", "/.well-known/openmew/*", "/migration/*", "/rooms/*"]
   },
   "routes": [
     { "pattern": "omew.wuyilingwei.com", "custom_domain": true }

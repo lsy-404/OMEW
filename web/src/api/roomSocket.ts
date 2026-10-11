@@ -164,7 +164,7 @@ export class RoomSocket implements RoomTransport {
     const claims = decodeTokenPayload(token)
     if (claims) this.handlers.onToken?.(claims)
 
-    const url = `${wsOrigin()}${this.wsPath}`
+    const url = /^wss?:\/\//.test(this.wsPath) ? this.wsPath : `${wsOrigin()}${this.wsPath}`
     const ws = new WebSocket(url, [token])
     this.ws = ws
 
