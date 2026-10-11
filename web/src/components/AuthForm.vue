@@ -155,9 +155,11 @@ async function requestPasswordReset() {
     await api.requestPasswordReset(recoveryForm.email, turnstileToken.value || undefined)
     recoveryNotice.value = '如果该邮箱对应已验证的 OMEW 账号，我们已发送密码重置邮件。'
   } catch (error) {
-    recoveryError.value = error instanceof ApiRequestError && error.code === 'EMAIL_SEND_FAILED'
-      ? '邮件暂时无法发送，请稍后重试或联系节点管理员。'
-      : '请求未完成，请稍后重试。'
+    recoveryError.value = error instanceof ApiRequestError && error.code === 'EMAIL_NOT_CONFIGURED'
+      ? '节点管理员尚未配置邮件服务，暂时无法恢复账号。'
+      : error instanceof ApiRequestError && error.code === 'EMAIL_SEND_FAILED'
+        ? '邮件暂时无法发送，请稍后重试或联系节点管理员。'
+        : '请求未完成，请稍后重试。'
   } finally {
     recoveryBusy.value = false
     resetTurnstile()
@@ -335,6 +337,10 @@ function registerErrorMessage(err: unknown): string {
         return '邀请码无效或已被使用'
       case 'PHONE_UNSUPPORTED':
         return '本实例暂不支持手机注册'
+      case 'EMAIL_NOT_CONFIGURED':
+        return '节点管理员尚未配置邮件服务，当前无法发送验证邮件'
+      case 'EMAIL_SEND_FAILED':
+        return '验证邮件发送失败，请稍后重试或联系节点管理员'
       case 'USERNAME_INVALID':
         return '用户名不可用，请更换后重试'
       case 'USERNAME_RESERVED':

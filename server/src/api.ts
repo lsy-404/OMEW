@@ -56,7 +56,7 @@ import {
   type WebauthnRegChallengeClaims,
 } from "./types";
 import { isReservedUsername } from "./reserved-usernames";
-import { consumeActionToken, logOperationalEvent, requestRateLimited, requireTurnstile, sendAccountActionEmail, turnstileEnabled } from "./account-recovery";
+import { AccountEmailError, findActionToken, issuanceRevoked, logOperationalEvent, requestRateLimited, requireTurnstile, sendAccountActionEmail, turnstileEnabled } from "./account-recovery";
 import {
   domainOfActor,
   generateInviteCode,
@@ -73,6 +73,15 @@ export { StrongholdDO } from "./stronghold-do";
 
 const SESSION_TOKEN_TTL_S = 24 * 60 * 60; // m0-protocol S7.2: session token lifetime MUST <= 24h.
 const LAST_ACTIVE_TOUCH_INTERVAL_MS = 5 * 60 * 1000;
+const EMAIL_VERIFICATION_BASIC_PATHS = new Set([
+  "/api/auth/logout",
+  "/api/me",
+  "/api/account/email/resend",
+  "/api/me/email",
+  "/api/me/password",
+  "/api/me/ownership",
+]);
+class EmailVerificationRequired extends Error {}
 const ROOM_TOKEN_TTL_S = 300; // m0-protocol S7.3: room/stronghold WS token exp MUST <= 300s.
 const MAX_BODY_BYTES = 64 * 1024;
 const USERS_PAGE_SIZE = 50;
@@ -684,12 +693,15 @@ async function requireSession(request: Request, env: Env): Promise<SessionTokenC
   }
   const localpart = localpartOfActor(claims.actor);
   await clearExpiredGlobalBan(env, localpart);
-  const current = await env.DB.prepare("SELECT server_role, status, last_active_at, sessions_revoked_at FROM users WHERE localpart = ?")
+  const current = await env.DB.prepare("SELECT server_role, status, last_active_at, sessions_revoked_at, email_verified FROM users WHERE localpart = ?")
     .bind(localpart)
-    .first<{ server_role: ServerRole; status: string; last_active_at: number | null; sessions_revoked_at: number | null }>();
+    .first<{ server_role: ServerRole; status: string; last_active_at: number | null; sessions_revoked_at: number | null; email_verified: number }>();
   if (!current || current.status !== "active") return apiError(401, "AUTH_REQUIRED");
-  if (current.sessions_revoked_at !== null && (typeof claims.iat !== "number" || claims.iat <= current.sessions_revoked_at)) {
+  if (issuanceRevoked(claims.iat, current.sessions_revoked_at)) {
     return apiError(401, "AUTH_REQUIRED");
+  }
+  if (getInstanceConfig(env).root_requirements.includes("email") && current.email_verified !== 1 && !EMAIL_VERIFICATION_BASIC_PATHS.has(new URL(request.url).pathname)) {
+    throw new EmailVerificationRequired();
   }
   await touchLastActive(env, localpart, current.last_active_at);
   return { ...claims, server_role: current.server_role };
@@ -701,6 +713,13 @@ function localAuthenticationRejection(env: Env): Response | null {
 
 function accountActionIp(request: Request): string {
   return request.headers.get("CF-Connecting-IP") ?? "unknown";
+}
+
+function accountEmailFailure(error: unknown): Response {
+  const code = error instanceof AccountEmailError && error.reason === "not_configured"
+    ? "EMAIL_NOT_CONFIGURED"
+    : "EMAIL_SEND_FAILED";
+  return apiError(503, code);
 }
 
 async function accountActionTurnstile(request: Request, env: Env, body: Record<string, unknown>, action: string): Promise<boolean> {
@@ -827,6 +846,28 @@ async function broadcastGroupRevoke(env: Env, localparts: string[]): Promise<voi
   );
 }
 
+async function broadcastSessionHardRevoke(env: Env, localparts: string[]): Promise<void> {
+  const unique = [...new Set(localparts)];
+  if (unique.length === 0) return;
+  const home = instanceDomain(env);
+  await Promise.all(unique.map(async (localpart) => {
+    const actor = `@${localpart}:${home}`;
+    try {
+      const { results } = await env.DB.prepare("SELECT stronghold_id FROM stronghold_member_index WHERE actor = ?")
+        .bind(actor).all<{ stronghold_id: string }>();
+      await Promise.all(results.map(async (row) => {
+        try {
+          await env.STRONGHOLD_DO.getByName(row.stronghold_id).revokeServerRole(actor);
+        } catch {
+          logOperationalEvent({ event: "account.websocket_revoke_failed", stronghold_id: row.stronghold_id });
+        }
+      }));
+    } catch {
+      logOperationalEvent({ event: "account.websocket_revoke_lookup_failed" });
+    }
+  }));
+}
+
 function match(pattern: string, path: string): Record<string, string> | null {
   const patternParts = pattern.split("/").filter(Boolean);
   const pathParts = path.split("/").filter(Boolean);
@@ -863,6 +904,7 @@ export default {
       return await route(request, env, url);
     } catch (err) {
       if (err instanceof ProtocolError) return protocolFailure(err);
+      if (err instanceof EmailVerificationRequired) return apiError(403, "EMAIL_VERIFICATION_REQUIRED");
       console.error(JSON.stringify({ level: "error", message: "unhandled api error", error: String(err) }));
       return errorResponse(500, "OMEW_INTERNAL", "internal error");
     }
@@ -932,6 +974,8 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
   }
 
   if (method === "POST" && path === "/api/account/password-reset") {
+    const rejected = localAuthenticationRejection(env);
+    if (rejected) return rejected;
     const body = await readJsonBody(request);
     if (!body) return apiError(413, "PAYLOAD_INVALID");
     const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
@@ -953,29 +997,37 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
         email,
         origin: new URL(request.url).origin,
       });
-    } catch {
-      return apiError(503, "EMAIL_SEND_FAILED");
+    } catch (error) {
+      return accountEmailFailure(error);
     }
     return json({ ok: true }, 202);
   }
 
   if (method === "POST" && path === "/api/account/password-reset/complete") {
+    const rejected = localAuthenticationRejection(env);
+    if (rejected) return rejected;
     const body = await readJsonBody(request);
     if (!body) return apiError(413, "PAYLOAD_INVALID");
     const token = typeof body.token === "string" ? body.token : "";
     const password = typeof body.new_password === "string" ? body.new_password : "";
     if (password.length < 8) return apiError(400, "PASSWORD_INVALID");
-    const action = await consumeActionToken(env, "password_reset", token);
+    const now = Date.now();
+    const action = await findActionToken(env, "password_reset", token, now);
     if (!action?.localpart) return apiError(400, "RESET_TOKEN_INVALID");
     const { hash, salt } = await hashPassword(password);
-    const revokedAt = Date.now() + 1;
-    const updated = await env.DB.prepare(
-      "UPDATE users SET pw_hash = ?, pw_salt = ?, sessions_revoked_at = ? WHERE localpart = ? AND lower(email) = ? AND email_verified = 1 AND status = 'active' AND pw_hash IS NOT NULL",
-    ).bind(hash, salt, revokedAt, action.localpart, action.email).run();
-    if (updated.meta.changes !== 1) return apiError(400, "RESET_TOKEN_INVALID");
-    await env.DB.prepare("UPDATE oidc_sessions SET revoked_at = ?, updated_at = ? WHERE localpart = ? AND revoked_at IS NULL")
-      .bind(nowS(), nowS(), action.localpart).run();
-    await broadcastGroupRevoke(env, [action.localpart]);
+    const revokedAt = now + 1;
+    const reset = await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE users SET pw_hash = ?, pw_salt = ?, sessions_revoked_at = ? WHERE localpart = ? AND lower(email) = ? AND email_verified = 1 AND status = 'active' AND pw_hash IS NOT NULL AND EXISTS (SELECT 1 FROM account_action_tokens WHERE token_hash = ? AND action = 'password_reset' AND expires_at > ?)",
+      ).bind(hash, salt, revokedAt, action.localpart, action.email, action.tokenHash, now),
+      env.DB.prepare(
+        "DELETE FROM account_action_tokens WHERE token_hash = ? AND action = 'password_reset' AND expires_at > ? AND EXISTS (SELECT 1 FROM users WHERE localpart = ? AND lower(email) = ? AND email_verified = 1 AND status = 'active' AND pw_hash = ? AND pw_salt = ? AND sessions_revoked_at = ?)",
+      ).bind(action.tokenHash, now, action.localpart, action.email, hash, salt, revokedAt),
+      env.DB.prepare("UPDATE oidc_sessions SET revoked_at = ?, updated_at = ? WHERE localpart = ? AND revoked_at IS NULL")
+        .bind(nowS(), nowS(), action.localpart),
+    ]);
+    if (reset[0]!.meta.changes !== 1 || reset[1]!.meta.changes !== 1) return apiError(400, "RESET_TOKEN_INVALID");
+    await broadcastSessionHardRevoke(env, [action.localpart]);
     logOperationalEvent({ event: "account.password_reset_completed" });
     return new Response(null, { status: 204, headers: cors() });
   }
@@ -984,18 +1036,25 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     const body = await readJsonBody(request);
     if (!body) return apiError(413, "PAYLOAD_INVALID");
     const token = typeof body.token === "string" ? body.token : "";
-    const action = await consumeActionToken(env, "email_verification", token);
+    const now = Date.now();
+    const action = await findActionToken(env, "email_verification", token, now);
     if (!action?.localpart) return apiError(400, "VERIFICATION_TOKEN_INVALID");
-    const updated = await env.DB.prepare(
-      "UPDATE users SET email_verified = 1 WHERE localpart = ? AND lower(email) = ? AND email_verified = 0 AND status = 'active'",
-    ).bind(action.localpart, action.email).run();
-    if (updated.meta.changes !== 1) return apiError(400, "VERIFICATION_TOKEN_INVALID");
-    await broadcastGroupRevoke(env, [action.localpart]);
+    const verification = await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE users SET email_verified = 1 WHERE localpart = ? AND lower(email) = ? AND email_verified = 0 AND status = 'active' AND EXISTS (SELECT 1 FROM account_action_tokens WHERE token_hash = ? AND action = 'email_verification' AND expires_at > ?)",
+      ).bind(action.localpart, action.email, action.tokenHash, now),
+      env.DB.prepare(
+        "DELETE FROM account_action_tokens WHERE token_hash = ? AND action = 'email_verification' AND expires_at > ? AND EXISTS (SELECT 1 FROM users WHERE localpart = ? AND lower(email) = ? AND email_verified = 1)",
+      ).bind(action.tokenHash, now, action.localpart, action.email),
+    ]);
+    if (verification[0]!.meta.changes !== 1 || verification[1]!.meta.changes !== 1) return apiError(400, "VERIFICATION_TOKEN_INVALID");
     logOperationalEvent({ event: "account.email_verified" });
     return json({ ok: true, email: action.email });
   }
 
   if (method === "POST" && path === "/api/me/email") {
+    const rejected = localAuthenticationRejection(env);
+    if (rejected) return rejected;
     const actor = await requireActor(request, env);
     if (!actor) return apiError(401, "AUTH_REQUIRED");
     const body = await readJsonBody(request);
@@ -1020,8 +1079,8 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
         email,
         origin: new URL(request.url).origin,
       });
-    } catch {
-      return apiError(503, "EMAIL_SEND_FAILED");
+    } catch (error) {
+      return accountEmailFailure(error);
     }
     await env.DB.prepare("UPDATE users SET email = ?, email_verified = 0 WHERE localpart = ?")
       .bind(email, localpart).run();
@@ -1029,6 +1088,8 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
   }
 
   if (method === "POST" && path === "/api/account/email/resend") {
+    const rejected = localAuthenticationRejection(env);
+    if (rejected) return rejected;
     const actor = await requireActor(request, env);
     if (!actor) return apiError(401, "AUTH_REQUIRED");
     const localpart = localpartOfActor(actor);
@@ -1046,8 +1107,8 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
         email: user.email,
         origin: new URL(request.url).origin,
       });
-    } catch {
-      return apiError(503, "EMAIL_SEND_FAILED");
+    } catch (error) {
+      return accountEmailFailure(error);
     }
     return json({ ok: true });
   }
@@ -1256,8 +1317,8 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
           email,
           origin: new URL(request.url).origin,
         });
-      } catch {
-        return apiError(503, "EMAIL_SEND_FAILED");
+      } catch (error) {
+        return accountEmailFailure(error);
       }
     }
 
@@ -1330,6 +1391,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
   }
 
   if (method === "POST" && path === "/api/login") {
+    const authenticationStartedAt = Date.now();
     const rejected = localAuthenticationRejection(env);
     if (rejected) return rejected;
     const body = await readJsonBody(request);
@@ -1373,12 +1435,12 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     // with a valid code before getting one.
     if (user.totp_enabled === 1) {
       const pending: TotpPendingTokenClaims = {
-        v: 1, typ: "totp_pending", actor, exp: nowS() + TOTP_PENDING_TTL_S, jti: newJti(),
+        v: 1, typ: "totp_pending", actor, iat: authenticationStartedAt, exp: nowS() + TOTP_PENDING_TTL_S, jti: newJti(),
       };
       return json({ totp_required: true, pending: await signToken(pending, env.DEV_TOKEN_SECRET) });
     }
 
-    const token = await issueSessionToken(actor, user.server_role, "local", env);
+    const token = await issueSessionToken(actor, user.server_role, "local", env, authenticationStartedAt);
     await touchLastActive(env, username);
     return json({ token, user: toPublicUser(user, actor), auth_source: "local" });
   }
@@ -1400,7 +1462,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     await clearExpiredGlobalBan(env, localpart);
 
     const user = await env.DB.prepare(
-      "SELECT localpart, display_name, avatar, cover, bio, status, server_role, email, email_verified, totp_secret, totp_enabled FROM users WHERE localpart = ?"
+      "SELECT localpart, display_name, avatar, cover, bio, status, server_role, email, email_verified, totp_secret, totp_enabled, sessions_revoked_at FROM users WHERE localpart = ?"
     )
       .bind(localpart)
       .first<{
@@ -1415,8 +1477,9 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
         email_verified: number;
         totp_secret: string | null;
         totp_enabled: number;
+        sessions_revoked_at: number | null;
       }>();
-    if (!user || user.status !== "active" || user.totp_enabled !== 1 || !user.totp_secret) {
+    if (!user || user.status !== "active" || issuanceRevoked(claims.iat, user.sessions_revoked_at) || user.totp_enabled !== 1 || !user.totp_secret) {
       return apiError(401, "AUTH_FAILED");
     }
 
@@ -1437,7 +1500,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     }
 
     await recordTotpSuccess(env, localpart);
-    const token = await issueSessionToken(claims.actor, user.server_role, "local", env);
+    const token = await issueSessionToken(claims.actor, user.server_role, "local", env, claims.iat);
     await touchLastActive(env, localpart);
     return json({ token, user: toPublicUser(user, claims.actor), auth_source: "local" });
   }
@@ -1553,6 +1616,8 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
   // ---- account: change password ----------------------------------------------------
 
   if (method === "POST" && path === "/api/me/password") {
+    const rejected = localAuthenticationRejection(env);
+    if (rejected) return rejected;
     const actor = await requireActor(request, env);
     if (!actor) return apiError(401, "AUTH_REQUIRED");
     const body = await readJsonBody(request);
@@ -1606,6 +1671,8 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
   // custody envelope client-side so it can attempt to unseal it with the old
   // password and re-wrap it with the new one (m0-protocol §7.9a).
   if (method === "GET" && path === "/api/me/ownership") {
+    const rejected = localAuthenticationRejection(env);
+    if (rejected) return rejected;
     const actor = await requireActor(request, env);
     if (!actor) return apiError(401, "AUTH_REQUIRED");
     const localpart = localpartOfActor(actor);
@@ -1828,7 +1895,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
     if (rejected) return rejected;
     const options = await generateAuthenticationOptions({ rpID: webauthnRpId(env), allowCredentials: [] });
     const challengeClaims: WebauthnAuthChallengeClaims = {
-      v: 1, typ: "webauthn_auth", challenge: options.challenge, exp: nowS() + WEBAUTHN_CHALLENGE_TTL_S, jti: newJti(),
+      v: 1, typ: "webauthn_auth", challenge: options.challenge, iat: Date.now(), exp: nowS() + WEBAUTHN_CHALLENGE_TTL_S, jti: newJti(),
     };
     return json({ options, challenge_token: await signToken(challengeClaims, env.DEV_TOKEN_SECRET) });
   }
@@ -1850,7 +1917,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
 
     const credentialId = response.id;
     const row = await env.DB.prepare(
-      "SELECT w.credential_id, w.public_key, w.counter, w.transports, w.localpart, u.display_name, u.avatar, u.cover, u.bio, u.status, u.server_role, u.email, u.email_verified, u.totp_enabled FROM webauthn_credentials w JOIN users u ON u.localpart = w.localpart WHERE w.credential_id = ?"
+      "SELECT w.credential_id, w.public_key, w.counter, w.transports, w.localpart, u.display_name, u.avatar, u.cover, u.bio, u.status, u.server_role, u.email, u.email_verified, u.totp_enabled, u.sessions_revoked_at FROM webauthn_credentials w JOIN users u ON u.localpart = w.localpart WHERE w.credential_id = ?"
     )
       .bind(credentialId)
       .first<{
@@ -1868,6 +1935,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
         email: string | null;
         email_verified: number;
         totp_enabled: number;
+        sessions_revoked_at: number | null;
       }>();
     if (!row) return apiError(401, "AUTH_FAILED");
     await clearExpiredGlobalBan(env, row.localpart);
@@ -1875,7 +1943,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
       const current = await env.DB.prepare("SELECT status FROM users WHERE localpart = ?").bind(row.localpart).first<{ status: string }>();
       if (current?.status === "active") row.status = "active";
     }
-    if (row.status !== "active") return apiError(401, "AUTH_FAILED");
+    if (row.status !== "active" || issuanceRevoked(claims.iat, row.sessions_revoked_at)) return apiError(401, "AUTH_FAILED");
 
     let verification: Awaited<ReturnType<typeof verifyAuthenticationResponse>>;
     try {
@@ -1906,7 +1974,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
       .run();
 
     const actor = `@${row.localpart}:${instanceDomain(env)}`;
-    const token = await issueSessionToken(actor, row.server_role, "local", env);
+    const token = await issueSessionToken(actor, row.server_role, "local", env, claims.iat);
     await touchLastActive(env, row.localpart);
     return json({ token, user: toPublicUser(row, actor), auth_source: "local" });
   }
@@ -4494,10 +4562,10 @@ function paginateMembers(members: MemberRow[], afterCursor: string | null): { pa
   return { page, next_cursor: hasMore && last ? last.actor : null };
 }
 
-async function issueSessionToken(actor: string, serverRole: ServerRole, authSource: AuthSource, env: Env): Promise<string> {
+async function issueSessionToken(actor: string, serverRole: ServerRole, authSource: AuthSource, env: Env, issuedAt = Date.now()): Promise<string> {
   const claims: SessionTokenClaims = {
     v: 1, typ: "session", actor, server_role: serverRole, auth_source: authSource,
-    iat: Date.now(), exp: nowS() + SESSION_TOKEN_TTL_S, jti: newJti(),
+    iat: issuedAt, exp: nowS() + SESSION_TOKEN_TTL_S, jti: newJti(),
   };
   return signToken(claims, env.DEV_TOKEN_SECRET);
 }

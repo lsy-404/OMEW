@@ -80,7 +80,6 @@ export type InstanceMode = "multi" | "single";
 // re-resolves local users' current role from D1 before every authorization
 // decision, so a demotion takes effect immediately.
 export interface SessionTokenClaims {
-  iat?: number;
   v: 1;
   typ: "session";
   actor: string;
@@ -101,6 +100,7 @@ export interface TotpPendingTokenClaims {
   actor: string;
   exp: number;
   jti: string;
+  iat?: number;
 }
 
 export interface WebauthnRegChallengeClaims {
@@ -118,6 +118,7 @@ export interface WebauthnAuthChallengeClaims {
   challenge: string;
   exp: number;
   jti: string;
+  iat?: number;
 }
 
 // Instance-level identity/governance policy (m0-protocol §7.9) - deployment env

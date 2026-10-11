@@ -19,6 +19,17 @@ export interface ThresholdEvent {
   threshold: number;
 }
 
+export function issuanceRevoked(issuedAt: number | undefined, revokedAt: number | null): boolean {
+  return revokedAt !== null && (issuedAt === undefined || issuedAt <= revokedAt);
+}
+
+export class AccountEmailError extends Error {
+  constructor(readonly reason: "not_configured" | "send_failed") {
+    super(reason === "not_configured" ? "ACCOUNT_EMAIL_NOT_CONFIGURED" : "ACCOUNT_EMAIL_SEND_FAILED");
+    this.name = "AccountEmailError";
+  }
+}
+
 export function evaluateThreshold(sample: ThresholdSample): ThresholdEvent | null {
   if (!sample.source || !Number.isFinite(sample.value) || !Number.isFinite(sample.threshold)) return null;
   if (sample.value < sample.threshold) return null;
@@ -116,7 +127,7 @@ export async function sendAccountActionEmail(
 ): Promise<void> {
   if (!emailSendingConfigured(env)) {
     logOperationalEvent({ event: "account.email_send_failed", action: options.action, reason: "configuration_missing" });
-    throw new Error("ACCOUNT_EMAIL_NOT_CONFIGURED");
+    throw new AccountEmailError("not_configured");
   }
   const now = options.now ?? Date.now();
   const token = createOpaqueToken();
@@ -154,7 +165,7 @@ export async function sendAccountActionEmail(
       ? error.code
       : "send_failed";
     logOperationalEvent({ event: "account.email_send_failed", action: options.action, code });
-    throw new Error("ACCOUNT_EMAIL_SEND_FAILED");
+    throw new AccountEmailError("send_failed");
   }
   logOperationalEvent({ event: "account.email_sent", action: options.action });
 }
@@ -185,20 +196,23 @@ export async function requestRateLimited(
   return false;
 }
 
-export async function consumeActionToken(
+export async function findActionToken(
   env: AccountRecoveryEnv,
   action: AccountAction,
   rawToken: string,
   now = Date.now(),
-): Promise<{ localpart: string | null; email: string } | null> {
+): Promise<{ localpart: string | null; email: string; tokenHash: string } | null> {
   if (rawToken.length < 32 || rawToken.length > 128) return null;
   const tokenHash = await hashOpaqueToken(rawToken);
   const row = await env.DB.prepare(
     "SELECT localpart, email FROM account_action_tokens WHERE token_hash = ? AND action = ? AND expires_at > ?",
   ).bind(tokenHash, action, now).first<{ localpart: string | null; email: string }>();
   if (!row) return null;
-  const deleted = await env.DB.prepare(
-    "DELETE FROM account_action_tokens WHERE token_hash = ? AND action = ? AND expires_at > ?",
-  ).bind(tokenHash, action, now).run();
-  return deleted.meta.changes === 1 ? row : null;
+  return { ...row, tokenHash };
+}
+
+export async function hasVerifiedAccountEmail(env: AccountRecoveryEnv, localpart: string): Promise<boolean> {
+  const row = await env.DB.prepare("SELECT email_verified FROM users WHERE localpart = ?")
+    .bind(localpart).first<{ email_verified: number }>();
+  return row?.email_verified === 1;
 }

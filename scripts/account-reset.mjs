@@ -33,6 +33,20 @@ try {
 if ((origin.protocol !== 'https:' && !(origin.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(origin.hostname))) ||
     origin.username || origin.password || origin.pathname !== '/' || origin.search || origin.hash) usage()
 
+let instanceConfig
+try {
+  const response = await fetch(new URL('/api/instance/config', origin))
+  if (!response.ok) throw new Error('Instance configuration unavailable')
+  instanceConfig = await response.json()
+} catch {
+  console.error('Could not verify the target instance configuration.')
+  process.exit(1)
+}
+if (instanceConfig.sso_mode === 'required') {
+  console.error('Local password recovery is disabled while this instance requires SSO.')
+  process.exit(1)
+}
+
 const token = randomBytes(32).toString('base64url')
 const tokenHash = createHash('sha256').update(token).digest('hex')
 const now = Date.now()

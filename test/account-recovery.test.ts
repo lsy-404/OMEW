@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:test";
 import { apiRequest, ensureMigrated, loginAs, registerUser } from "./helpers";
-import { evaluateThreshold, hashOpaqueToken, verifyTurnstile } from "../server/src/account-recovery";
+import { evaluateThreshold, hashOpaqueToken, issuanceRevoked, verifyTurnstile } from "../server/src/account-recovery";
 import recoveryMigration from "../server/migrations/0027_account_recovery.sql?raw";
 
 beforeAll(async () => {
@@ -23,6 +23,15 @@ describe("opaque recovery token handling", () => {
     expect(digest).toMatch(/^[a-f0-9]{64}$/);
     expect(digest).not.toContain(token);
     expect(await hashOpaqueToken(token)).toBe(digest);
+  });
+});
+
+describe("session issuance revocation", () => {
+  it("rejects tokens issued before the account revocation time, including legacy tokens without iat", () => {
+    expect(issuanceRevoked(100, 101)).toBe(true);
+    expect(issuanceRevoked(undefined, 101)).toBe(true);
+    expect(issuanceRevoked(102, 101)).toBe(false);
+    expect(issuanceRevoked(undefined, null)).toBe(false);
   });
 });
 
@@ -144,6 +153,47 @@ describe("password recovery", () => {
     });
     expect(stillValid.status).toBe(200);
   });
+
+  it("keeps the one-time token usable when the password update transaction fails", async () => {
+    const username = "recoveryretry";
+    const { json } = await registerUser({
+      username,
+      password: "retry-original-password-123",
+      ownership_pubkey: "recovery-retry-key",
+      ownership_ciphertext: "recovery-retry-envelope",
+    });
+    await env.DB.prepare("UPDATE users SET email = ?, email_verified = 1 WHERE localpart = ?")
+      .bind("recovery-retry@example.com", username).run();
+    const token = "retryable-password-reset-token-value-2026";
+    const tokenHash = await hashOpaqueToken(token);
+    const now = Date.now();
+    await env.DB.prepare(
+      "INSERT INTO account_action_tokens (token_hash, action, localpart, email, created_at, expires_at) VALUES (?, 'password_reset', ?, ?, ?, ?)",
+    ).bind(tokenHash, username, "recovery-retry@example.com", now, now + 60_000).run();
+    await env.DB.prepare(`CREATE TRIGGER fail_recoveryretry_password_update
+      BEFORE UPDATE OF pw_hash ON users WHEN NEW.localpart = '${username}'
+      BEGIN SELECT RAISE(ABORT, 'forced update failure'); END`).run();
+    try {
+      const failed = await apiRequest("/api/account/password-reset/complete", {
+        method: "POST", body: JSON.stringify({ token, new_password: "retry-new-password-456" }),
+      });
+      expect(failed.status).toBe(500);
+      const stillAvailable = await env.DB.prepare("SELECT token_hash FROM account_action_tokens WHERE token_hash = ?")
+        .bind(tokenHash).first();
+      expect(stillAvailable).not.toBeNull();
+    } finally {
+      await env.DB.prepare("DROP TRIGGER fail_recoveryretry_password_update").run();
+    }
+
+    const retry = await apiRequest("/api/account/password-reset/complete", {
+      method: "POST", body: JSON.stringify({ token, new_password: "retry-new-password-456" }),
+    });
+    expect(retry.status).toBe(204);
+    const oldSession = await apiRequest("/api/me/ownership", {
+      headers: { Authorization: `Bearer ${json.token as string}` },
+    });
+    expect(oldSession.status).toBe(401);
+  });
 });
 
 describe("email verification", () => {
@@ -178,5 +228,63 @@ describe("email verification", () => {
       method: "POST", body: JSON.stringify({ token }),
     });
     expect(replay.status).toBe(400);
+  });
+
+  it("limits unverified sessions to verification and account basics when email is required", async () => {
+    const username = "emailgatecontract";
+    const registered = await registerUser({
+      username,
+      password: "verification-gate-password-123",
+      ownership_pubkey: "verification-gate-key",
+      ownership_ciphertext: "verification-gate-envelope",
+    });
+    expect(registered.status).toBe(200);
+    const { json } = registered;
+    await env.DB.prepare("UPDATE users SET email = ?, email_verified = 0 WHERE localpart = ?")
+      .bind("gate-contract@example.com", username).run();
+    const previousRequirements = env.ROOT_REQUIREMENTS;
+    env.ROOT_REQUIREMENTS = "email";
+    try {
+      const protectedResponse = await apiRequest("/api/me/passkeys", {
+        headers: { Authorization: `Bearer ${json.token as string}` },
+      });
+      expect(await protectedResponse.json()).toEqual({ error: "EMAIL_VERIFICATION_REQUIRED" });
+      expect(protectedResponse.status).toBe(403);
+
+      const accountBasics = await apiRequest("/api/me/ownership", {
+        headers: { Authorization: `Bearer ${json.token as string}` },
+      });
+      expect(accountBasics.status).toBe(200);
+    } finally {
+      env.ROOT_REQUIREMENTS = previousRequirements;
+    }
+  });
+});
+
+describe("SSO-required account boundaries", () => {
+  it("rejects local recovery and email mutation when local authentication is disabled", async () => {
+    const previousMode = env.SSO_MODE;
+    env.SSO_MODE = "required";
+    try {
+      const resetRequest = await apiRequest("/api/account/password-reset", {
+        method: "POST", body: JSON.stringify({ email: "member@example.com" }),
+      });
+      expect(resetRequest.status).toBe(403);
+      expect(await resetRequest.json()).toEqual({ error: "SSO_REQUIRED" });
+
+      const resetComplete = await apiRequest("/api/account/password-reset/complete", {
+        method: "POST", body: JSON.stringify({ token: "opaque-token", new_password: "new-password-123" }),
+      });
+      expect(resetComplete.status).toBe(403);
+      expect(await resetComplete.json()).toEqual({ error: "SSO_REQUIRED" });
+
+      const emailChange = await apiRequest("/api/me/email", {
+        method: "POST", body: JSON.stringify({ email: "member@example.com" }),
+      });
+      expect(emailChange.status).toBe(403);
+      expect(await emailChange.json()).toEqual({ error: "SSO_REQUIRED" });
+    } finally {
+      env.SSO_MODE = previousMode;
+    }
   });
 });
