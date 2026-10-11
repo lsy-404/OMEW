@@ -32,6 +32,7 @@ const connected = ref(false)
 const muted = ref(false)
 const historyLoading = ref(false)
 const hasMoreHistory = ref(true)
+let historyCursor: number | null = null
 
 let transport: RoomTransport | null = null
 let roomKey = ''
@@ -89,8 +90,9 @@ function stopGuestPolling() {
 async function pollLatest(nodeId: string, resId: string, key: string) {
   if (roomKey !== key) return
   try {
-    const page = await api.getRoomHistory(null, nodeId, resId, null, HISTORY_PAGE_SIZE)
+    const result = await api.getRoomHistory(null, nodeId, resId, null, HISTORY_PAGE_SIZE)
     if (roomKey !== key) return
+    const page = result.items
     const merged = [...items.value, ...page]
     const dedup = new Map(merged.map((i) => [i.seq, i]))
     items.value = [...dedup.values()].sort((a, b) => a.seq - b.seq)
@@ -114,6 +116,7 @@ async function connectRoom(nodeId: string, room: RoomSummary, readOnly: boolean)
   items.value = []
   pending.value = []
   hasMoreHistory.value = true
+  historyCursor = null
   connected.value = false
   muted.value = false
   for (const t of ackTimers.values()) clearTimeout(t)
@@ -228,8 +231,10 @@ async function loadHistory(nodeId: string, resId: string, before: number | null)
   const auth = useAuth()
   historyLoading.value = true
   try {
-    const page = await api.getRoomHistory(auth.token.value, nodeId, resId, before, HISTORY_PAGE_SIZE)
-    if (page.length < HISTORY_PAGE_SIZE) hasMoreHistory.value = false
+    const result = await api.getRoomHistory(auth.token.value, nodeId, resId, before, HISTORY_PAGE_SIZE)
+    const page = result.items
+    historyCursor = result.next_before
+    hasMoreHistory.value = result.has_more
     // freshly-fetched `page` wins on overlap (authoritative reactions/body),
     // same precedence as pollLatest below - items.value first so page's
     // entries land later in iteration order and overwrite by seq.
@@ -269,9 +274,17 @@ export function useChatRoom() {
   async function loadOlder(): Promise<void> {
     const nodeId = selectedNodeId.value
     const room = selectedChannel.value
-    const oldest = items.value[0]?.seq
-    if (!nodeId || !room || !oldest || historyLoading.value || !hasMoreHistory.value) return
-    await loadHistory(nodeId, room.id, oldest)
+    if (!nodeId || !room || historyCursor == null || historyLoading.value || !hasMoreHistory.value) return
+    await loadHistory(nodeId, room.id, historyCursor)
+  }
+
+  async function loadUntil(seq: number): Promise<boolean> {
+    while (!items.value.some((item) => item.seq === seq) && hasMoreHistory.value && historyCursor != null) {
+      const cursor = historyCursor
+      await loadOlder()
+      if (historyCursor === cursor) break
+    }
+    return items.value.some((item) => item.seq === seq)
   }
 
   function sendText(text: string, media?: MediaAttachment[]) {
@@ -391,6 +404,7 @@ export function useChatRoom() {
     historyLoading,
     hasMoreHistory,
     loadOlder,
+    loadUntil,
     sendText,
     resend,
     editMessage,

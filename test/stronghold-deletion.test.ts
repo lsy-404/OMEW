@@ -1,6 +1,7 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import type { RoomDO } from "../server/src/room-do";
+import migration0026 from "../server/migrations/0026_archive_search.sql?raw";
 import { apiRequest, ensureMigrated, sessionToken } from "./helpers";
 
 let sequence = 0;
@@ -17,6 +18,12 @@ async function createStronghold(owner: string, idOverride?: string): Promise<{ i
 
 beforeAll(async () => {
   await ensureMigrated();
+  const migrated = await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'room_backup'").first();
+  if (!migrated) {
+    for (const statement of migration0026.split("\n").filter((line) => !line.trim().startsWith("--")).join("\n").split(";").map((sql) => sql.trim()).filter(Boolean)) {
+      await env.DB.prepare(statement).run();
+    }
+  }
 });
 
 describe("DELETE /api/stronghold/:id", () => {
@@ -61,6 +68,7 @@ describe("DELETE /api/stronghold/:id", () => {
     const { id, roomRef } = await createStronghold(owner, `delete_${Date.now()}${sequence++}`);
     const archivedRef = `${id}/sec/archived`;
     const foreignArchiveRef = `${id.replace("_", "x")}/ch/foreign`;
+    const backupKey = `backups/${encodeURIComponent(roomRef)}/${crypto.randomUUID()}.ndjson.gz`;
     const member = "@deleteguest:remote.example";
     await env.STRONGHOLD_DO.getByName(id).addMember(member, "member");
     await env.DB.prepare(
@@ -69,6 +77,7 @@ describe("DELETE /api/stronghold/:id", () => {
     await env.MEDIA.put("archive/keep-index-test", new Uint8Array([1]));
     await env.MEDIA.put("archive/foreign-index-test", new Uint8Array([2]));
     await env.MEDIA.put("archive/shared-index-test", new Uint8Array([3]));
+    await env.MEDIA.put(backupKey, new Uint8Array([4]));
     await env.DB.batch([
       env.DB.prepare("INSERT OR IGNORE INTO stronghold_slug_index (slug, stronghold_id) VALUES (?, ?)").bind(`cleanup-${sequence}`, id),
       env.DB.prepare("INSERT INTO guest_member_state (actor, stronghold_id) VALUES (?, ?)").bind(member, id),
@@ -82,6 +91,8 @@ describe("DELETE /api/stronghold/:id", () => {
         .bind(foreignArchiveRef, 4, 6, "archive/shared-index-test", Date.now()),
       env.DB.prepare("INSERT INTO media (id, hash, owner_actor, size, mime, r2_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
         .bind(`media-${sequence}`, "hash", owner, 10, "image/webp", "media/keep-test", Date.now()),
+      env.DB.prepare("INSERT INTO room_backup (id, do_key, owner_actor, r2_key, created_at, sha256, byte_length) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .bind(crypto.randomUUID(), roomRef, owner, backupKey, Date.now(), "digest", 1),
     ]);
 
     const response = await apiRequest(`/api/stronghold/${id}`, {
@@ -108,6 +119,8 @@ describe("DELETE /api/stronghold/:id", () => {
     expect(await env.MEDIA.get("archive/keep-index-test")).toBeNull();
     expect(await env.MEDIA.get("archive/foreign-index-test")).not.toBeNull();
     expect(await env.MEDIA.get("archive/shared-index-test")).not.toBeNull();
+    expect(await env.MEDIA.get(backupKey)).toBeNull();
+    expect(await env.DB.prepare("SELECT * FROM room_backup WHERE do_key = ?").bind(roomRef).all()).toMatchObject({ results: [] });
     expect(await env.DB.prepare("SELECT id FROM media WHERE id = ?").bind(`media-${sequence}`).first()).toEqual({ id: `media-${sequence}` });
   });
 

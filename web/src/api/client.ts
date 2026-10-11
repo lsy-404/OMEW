@@ -494,10 +494,18 @@ export const realApi = {
     if (before != null) params.set('before', String(before))
     if (limit != null) params.set('limit', String(limit))
     const qs = params.toString()
-    return request<{ items: import('./types').RoomItem[] }>(
+    return request<{ items: import('./types').RoomItem[]; next_before: number | null; has_more: boolean }>(
       `/stronghold/${nodeId}/rooms/${resId}/history${qs ? `?${qs}` : ''}`,
       { headers: optionalAuthHeaders(token) },
-    ).then((r) => r.items)
+    )
+  },
+
+  searchRoomHistory: (token: string | null, nodeId: string, resId: string, query: string) => {
+    const params = new URLSearchParams({ q: query })
+    return request<{ items: { seq: number; root_seq: number; actor: string; ts: number; kind: string; text: string }[] }>(
+      `/api/stronghold/${nodeId}/rooms/${resId}/search?${params}`,
+      { headers: optionalAuthHeaders(token) },
+    ).then((result) => result.items)
   },
 
   editItem: (token: string, nodeId: string, resId: string, seq: number, content: unknown) =>

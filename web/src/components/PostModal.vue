@@ -24,7 +24,7 @@ const MarkdownContent = defineAsyncComponent(() => import('./MarkdownContent.vue
 const auth = useAuth()
 const { openAuthModal } = useAuthModal()
 const { isReadOnly } = useStronghold()
-const { openPostSeq, close } = usePostModal()
+const { openPostSeq, targetReplySeq, close } = usePostModal()
 const {
   thread,
   threadLoading,
@@ -65,11 +65,16 @@ function formatTime(ts: number): string {
   return new Date(ts).toLocaleString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
 
-watch(openPostSeq, (seq) => {
+watch([openPostSeq, targetReplySeq], async ([seq, targetSeq]) => {
   editingSeq.value = null
   actionNotice.value = ''
-  if (seq != null) void openThread(seq)
-  else closeThread()
+  if (seq != null) {
+    await openThread(seq, targetSeq)
+    if (targetSeq != null) {
+      await nextTick()
+      document.querySelector<HTMLElement>(`[data-reply-seq="${targetSeq}"]`)?.scrollIntoView({ block: 'center' })
+    }
+  } else closeThread()
 })
 
 function submitReply() {
@@ -352,6 +357,7 @@ const visiblePostMedia = computed(() => {
                     v-for="reply in thread.replies"
                     :key="reply.seq"
                     class="post-modal__reply"
+                    :data-reply-seq="reply.seq"
                     @contextmenu="onReplyContextMenu(reply, $event)"
                     @touchstart.passive="onReplyTouchStart(reply, $event)"
                     @touchmove.passive="onReplyTouchMove"
