@@ -130,6 +130,55 @@ export function getSsoConfig(env: Env): SsoRuntimeConfig {
   };
 }
 
+export interface EmbedOrigins {
+  /** CSP host-sources in configured order; empty when any entry is malformed. */
+  sources: string[];
+  allows(origin: URL): boolean;
+}
+
+interface EmbedSource {
+  source: string;
+  protocol: string;
+  hostname: string;
+  port: string;
+  subdomains: boolean;
+}
+
+function parseEmbedSource(entry: string): EmbedSource | null {
+  const match = /^(https?:\/\/)(\*\.)?(.+)$/.exec(entry);
+  if (!match) return null;
+  const [, scheme, wildcard, authority] = match;
+  let url: URL;
+  try {
+    url = new URL(`${scheme}${authority}`);
+  } catch {
+    return null;
+  }
+  if (url.origin !== `${scheme}${authority}`) return null;
+  return {
+    source: wildcard ? `${scheme}*.${url.host}` : url.origin,
+    protocol: url.protocol,
+    hostname: url.hostname,
+    port: url.port,
+    subdomains: Boolean(wildcard),
+  };
+}
+
+// EMBED_ORIGIN lists the pages allowed to frame this instance as comma-separated
+// CSP host-sources: exact origins, or `https://*.example.com` for every subdomain.
+export function getEmbedOrigins(env: Env): EmbedOrigins | null {
+  const entries = parseCsv(env.EMBED_ORIGIN, []);
+  if (entries.length === 0) return null;
+  const parsed = entries.map(parseEmbedSource);
+  const sources = parsed.every((source): source is EmbedSource => source !== null) ? parsed : [];
+  return {
+    sources: sources.map((source) => source.source),
+    allows: (origin) => sources.some((source) => source.subdomains
+      ? origin.protocol === source.protocol && origin.port === source.port && origin.hostname.endsWith(`.${source.hostname}`)
+      : origin.origin === source.source),
+  };
+}
+
 export function getInstanceConfig(env: Env): InstanceConfig {
   return {
     instance_mode: parseInstanceMode(env.INSTANCE_MODE),

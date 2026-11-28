@@ -11,7 +11,7 @@ import type {
   RegistrationResponseJSON,
 } from "@simplewebauthn/server";
 import { base64UrlDecode, base64UrlEncode, dummyPasswordFields, hashPassword, newJti, signToken, verifyPassword, verifyToken } from "./auth";
-import { getInstanceBranding, getInstanceConfig, getSsoConfig, isValidOidcIssuer } from "./config";
+import { getEmbedOrigins, getInstanceBranding, getInstanceConfig, getSsoConfig, isValidOidcIssuer, type EmbedOrigins } from "./config";
 import { federationRoutes } from "./federation-routes";
 import { failure as protocolFailure, ProtocolError } from "./federation-codec";
 import { consumeDeadLetters, consumeFederationQueue, runFederationMaintenance, validGuestSession, type Delivery } from "./federation";
@@ -479,12 +479,13 @@ function requestUrl(value: string | null): URL | null {
   }
 }
 
-function isAllowedEmbeddedDocument(request: Request, embedOrigin: string): boolean {
+function isAllowedEmbeddedDocument(request: Request, embed: EmbedOrigins): boolean {
   const referer = requestUrl(request.headers.get("Referer"));
   const requestOrigin = new URL(request.url).origin;
+  const fromEmbedder = referer !== null && referer.origin !== requestOrigin && embed.allows(referer);
   const destination = request.headers.get("Sec-Fetch-Dest")?.toLowerCase() ?? "";
   if (destination === "iframe") {
-    if (referer?.origin === embedOrigin) return true;
+    if (fromEmbedder) return true;
     if (referer?.origin !== requestOrigin) return false;
     return request.headers.get("Sec-Fetch-Site") === "same-origin" || referer.pathname === "/api/auth/oidc/callback";
   }
@@ -493,7 +494,7 @@ function isAllowedEmbeddedDocument(request: Request, embedOrigin: string): boole
   }
   // Safari does not consistently send Fetch Metadata. The parent origin is
   // still present on the initial cross-origin iframe request.
-  return !destination && referer?.origin === embedOrigin;
+  return !destination && fromEmbedder;
 }
 
 function isDynamicPath(path: string): boolean {
@@ -501,23 +502,21 @@ function isDynamicPath(path: string): boolean {
 }
 
 function embedOnlyRejection(request: Request, env: Env, url: URL): Response | null {
-  const embedOrigin = env.EMBED_ORIGIN?.trim();
-  if (!embedOrigin || request.method !== "GET") return null;
+  const embed = getEmbedOrigins(env);
+  if (!embed || request.method !== "GET") return null;
   const path = url.pathname;
   if (isDynamicPath(path)) return null;
   const destination = request.headers.get("Sec-Fetch-Dest")?.toLowerCase() ?? "";
   if (destination && destination !== "document" && destination !== "iframe") return null;
-  try {
-    const configuredOrigin = new URL(embedOrigin);
-    if (configuredOrigin.origin !== embedOrigin || !isAllowedEmbeddedDocument(request, configuredOrigin.origin)) {
-      return new Response("此论坛仅在星尘粉丝站内提供", {
-        status: 403,
-        headers: { "Cache-Control": "no-store", "Content-Type": "text/plain; charset=UTF-8" },
-      });
-    }
-  } catch {
+  if (embed.sources.length === 0) {
     return new Response("此论坛暂未正确配置嵌入来源", {
       status: 503,
+      headers: { "Cache-Control": "no-store", "Content-Type": "text/plain; charset=UTF-8" },
+    });
+  }
+  if (!isAllowedEmbeddedDocument(request, embed)) {
+    return new Response("此论坛仅在星尘粉丝站内提供", {
+      status: 403,
       headers: { "Cache-Control": "no-store", "Content-Type": "text/plain; charset=UTF-8" },
     });
   }

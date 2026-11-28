@@ -20,7 +20,7 @@
     "INSTANCE_DOMAIN": "omew.stardustinfinity.top",
     "CF_WORKER_NAME": "stardust-omew",
     "INSTANCE_NAME": "论坛",
-    "EMBED_ORIGIN": "https://stardustinfinity.top",
+    "EMBED_ORIGIN": "https://stardustinfinity.top,https://*.stardustinfinity.top",
     "INSTANCE_MODE": "single",
     "ROOT_STRONGHOLD": "medium5",
     "SSO_MODE": "required",

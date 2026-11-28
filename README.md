@@ -22,6 +22,8 @@ SSO 首次登录会导入提供方的 `nickname`（未提供时使用 `name` 或
 
 若只运行一个据点，可将 `INSTANCE_MODE=single` 与 `ROOT_STRONGHOLD=<据点短名>` 一起设置。该模式会把指定据点作为 `/` 的主内容，隐藏首页和据点导航栏，并拒绝其他据点的访问、创建、删除与转让；`INSTANCE_MODE=multi` 保留普通多据点首页。
 
+设置 `EMBED_ORIGIN` 后，实例页面只能在所列来源的 iframe 中打开，直接访问会被拒绝。取值为逗号分隔的来源列表，可用 `https://*.example.com` 放行某个域名的全部子域名（不含该域名本身），例如 `https://example.com,https://*.example.com`。
+
 个人设置可用区块由 `PERSONAL_SETTINGS_SECTIONS` 的 CSV allowlist 定义，可选值为 `profile`、`security`、`appearance`；未配置时全部启用，显式空值会隐藏个人设置入口。`USE_BUILTIN_EMOTES`、`USE_BUILTIN_REACTIONS` 与 `USE_ART_ASSETS` 是三个独立开关，因此可分别控制内置标准表情、内置反应图片和默认头像/背景/空状态插画；`ENABLE_EMOTES` 与 `ENABLE_REACTIONS` 仍分别是两项功能的总开关。
 
 ## 文档 / Docs

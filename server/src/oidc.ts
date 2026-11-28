@@ -14,7 +14,7 @@ import {
   type JWTPayload,
 } from "jose";
 import { base64UrlDecode, base64UrlEncode, signToken, verifyToken } from "./auth";
-import { getSsoConfig, type SsoRuntimeConfig } from "./config";
+import { getEmbedOrigins, getSsoConfig, type SsoRuntimeConfig } from "./config";
 import { HOME_DOMAIN, instanceDomain, type ServerRole, type SessionTokenClaims } from "./types";
 import { isValidEmail, isValidUsername, normalizeUsername } from "./users";
 
@@ -1001,21 +1001,14 @@ export function oidcLoginCompletionRedirect(request: Request, env: Env, returnTo
   const destination = new URL(safeReturnTo(returnTo), trustedRequestOrigin(request, env));
   destination.hash = new URLSearchParams({ sso_complete: code }).toString();
   const clearCookie = clearOidcTransactionCookie(request);
-  const embedOrigin = env.EMBED_ORIGIN?.trim();
-  if (!embedOrigin) return redirect(destination.toString(), clearCookie, "same-origin");
-
-  let frameAncestor: string;
-  try {
-    frameAncestor = new URL(embedOrigin).origin;
-  } catch {
-    return redirect(destination.toString(), clearCookie, "same-origin");
-  }
+  const embed = getEmbedOrigins(env);
+  if (!embed || embed.sources.length === 0) return redirect(destination.toString(), clearCookie, "same-origin");
 
   const target = escapeHtmlAttribute(destination.toString());
   const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="referrer" content="same-origin"><meta http-equiv="refresh" content="0;url=${target}"><title>正在进入论坛</title></head><body><a href="${target}">继续进入论坛</a></body></html>`;
   const headers = new Headers({
     "Cache-Control": "no-store",
-    "Content-Security-Policy": `default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors ${frameAncestor}`,
+    "Content-Security-Policy": `default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors ${embed.sources.join(" ")}`,
     "Content-Type": "text/html; charset=UTF-8",
     Pragma: "no-cache",
     "Referrer-Policy": "same-origin",
