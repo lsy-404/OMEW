@@ -872,6 +872,7 @@ export const mockApi = {
       sso_session_locked: false,
       sso_nickname_locked: config.sso_mode !== 'disabled' && config.sso_nickname_locked,
       turnstile_site_key: null,
+      voice_enabled: true,
       logo_url: null,
       emotes_enabled: true,
       builtin_emotes_enabled: true,

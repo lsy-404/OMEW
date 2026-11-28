@@ -40,6 +40,15 @@ function liveKitConfig(env: Env) {
   };
 }
 
+export function voiceConfigured(env: Env): boolean {
+  try {
+    liveKitConfig(env);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function liveKitRoomName(env: Env, roomRef: string): Promise<string> {
   const input = new TextEncoder().encode(`openmew/voice/v1\0${instanceDomain(env)}\0${roomRef}`);
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", input));

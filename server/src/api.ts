@@ -16,7 +16,7 @@ import { federationRoutes } from "./federation-routes";
 import { failure as protocolFailure, ProtocolError } from "./federation-codec";
 import { consumeDeadLetters, consumeFederationQueue, runFederationMaintenance, validGuestSession, type Delivery } from "./federation";
 import { ftsQuery, searchableText } from "./archive";
-import { createVoiceAccessToken, revokeVoiceParticipantFromStronghold, revokeVoiceRoomParticipants, VoiceUnavailableError, retryVoiceRevocations } from "./voice";
+import { createVoiceAccessToken, revokeVoiceParticipantFromStronghold, revokeVoiceRoomParticipants, VoiceUnavailableError, retryVoiceRevocations, voiceConfigured } from "./voice";
 import {
   beginOidcAuthorization,
   clearOidcTransactionCookie,
@@ -975,6 +975,7 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
       sso_session_locked: sso.session_locked,
       sso_nickname_locked: sso.nickname_locked,
       turnstile_site_key: turnstileEnabled(env) ? env.TURNSTILE_SITE_KEY : null,
+      voice_enabled: voiceConfigured(env),
       ...getInstanceBranding(env),
     });
   }

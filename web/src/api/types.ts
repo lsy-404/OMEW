@@ -36,6 +36,7 @@ export interface InstanceConfig {
   sso_session_locked: boolean
   sso_nickname_locked: boolean
   turnstile_site_key: string | null
+  voice_enabled: boolean
   logo_url: string | null
   emotes_enabled: boolean
   builtin_emotes_enabled: boolean

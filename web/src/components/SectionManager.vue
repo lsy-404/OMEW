@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { api, ApiRequestError } from '../api'
 import type { RoomSummary } from '../api/types'
 import { useAuth } from '../composables/useAuth'
+import { useInstanceConfig } from '../composables/useInstanceConfig'
 import { useStronghold } from '../composables/useStronghold'
 import { maxLengthError, requiredMaxLengthError } from '../utils/validate'
 import { WinButton } from '../vendor/winui'
@@ -15,6 +16,8 @@ const roomCountLabel = computed(() => (props.type === 'channel' ? '' : '篇帖�
 
 const auth = useAuth()
 const { selectedNodeId, loadStrongholds } = useStronghold()
+const { config: instanceConfig } = useInstanceConfig()
+const voiceAvailable = computed(() => instanceConfig.value?.voice_enabled === true)
 
 const busy = ref(false)
 const listError = ref('')
@@ -219,7 +222,7 @@ async function create() {
             <p v-if="editError" class="field__error">{{ editError }}</p>
             <input v-model="editingDescription" type="text" maxlength="64" :placeholder="`${roomLabel}描述（可选，≤64 字）`" @keyup.enter="saveEdit(room)" @keyup.escape="cancelEdit" />
             <p v-if="descError" class="field__error">{{ descError }}</p>
-            <label v-if="props.type === 'channel'" class="room-capability">
+            <label v-if="props.type === 'channel' && voiceAvailable" class="room-capability">
               <input v-model="editingVoiceEnabled" type="checkbox" />
               启用语音
             </label>
@@ -261,7 +264,7 @@ async function create() {
       <div class="field section-create__field">
         <input v-model="newName" type="text" maxlength="32" :placeholder="`新建${roomLabel}名称`" @keyup.enter="create" />
         <p v-if="createError" class="field__error">{{ createError }}</p>
-        <label v-if="props.type === 'channel'" class="room-capability">
+        <label v-if="props.type === 'channel' && voiceAvailable" class="room-capability">
           <input v-model="createVoiceEnabled" type="checkbox" />
           启用语音
         </label>
